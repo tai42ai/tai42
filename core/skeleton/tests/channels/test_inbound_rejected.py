@@ -189,6 +189,7 @@ _ROUTE_WORDS = ReplyTexts(
     rejected_too_large="Ese archivo es demasiado grande.",
     rejected_could_not_receive="No se pudo recibir ese adjunto.",
     rejected_unreadable="No se pudo leer ese mensaje. Envíalo de nuevo.",
+    rejected_choice_unavailable="Esa opción ya no está disponible. Escribe tu respuesta como mensaje.",
 )
 
 
@@ -199,6 +200,7 @@ _ROUTE_WORDS = ReplyTexts(
         (InboundRejectionReason.TOO_LARGE, "rejected_too_large"),
         (InboundRejectionReason.COULD_NOT_RECEIVE, "rejected_could_not_receive"),
         (InboundRejectionReason.UNREADABLE, "rejected_unreadable"),
+        (InboundRejectionReason.CHOICE_UNAVAILABLE, "rejected_choice_unavailable"),
     ],
 )
 async def test_each_refusal_notice_draws_the_route_words(register_channel, monkeypatch, route_table, reason, member):

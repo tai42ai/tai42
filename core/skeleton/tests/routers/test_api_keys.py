@@ -28,7 +28,7 @@ from starlette.responses import Response
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM, OWNER_USER_ID_CLAIM
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplateBodyError, TemplatedText
 from tai42_identity_redis import redis_api_key_provider as provider_module
 from tai42_identity_redis.redis_api_key_provider import RedisApiKeyProvider
 
@@ -1033,18 +1033,29 @@ async def test_validate_condition_present_but_empty_string_is_400(bound_app: Any
     assert "lock the key out" in _body(resp)["error"]
 
 
-async def test_validate_condition_infra_error_propagates_as_500(bound_app: Any) -> None:
-    # An infra fault while rendering (an unconfigured resource manager, a redis/storage
-    # outage) is NOT an author error: ``validate_condition`` catches only the author
-    # exception set ``(ValueError, ValidationError, TemplateError, TemplateNotFoundError)``
-    # → 400 and lets everything else propagate → 500. Drive a plain ``RuntimeError``
-    # through the render path and assert it propagates rather than being masked as a 400.
+async def test_validate_condition_that_does_not_render_as_authored_is_400(bound_app: Any) -> None:
+    async def _refuse(text: Any, locale: Any = None) -> str:
+        raise TemplateBodyError("is not a renderable template: division by zero")
+
+    bound_app.storage.resource_manager.render_templated_text = _refuse
+    resp = await api_keys.validate_condition(_req(body={"condition": _cond("{{ 1 / 0 }}")}))
+    assert resp.status_code == 400
+    assert _body(resp)["error"] == "is not a renderable template: division by zero"
+
+
+@pytest.mark.parametrize(
+    "fault", [RuntimeError("resource manager down"), ConnectionError("store down"), ValueError("manager bug")]
+)
+async def test_validate_condition_infra_error_propagates_as_500(bound_app: Any, fault: Exception) -> None:
+    # A fault while rendering that is not the author's (an unconfigured resource manager, a
+    # storage outage, the manager's own bug) propagates as itself, never masked as a 400.
     async def _boom(text: Any, locale: Any = None) -> str:
-        raise RuntimeError("resource manager down")
+        raise fault
 
     bound_app.storage.resource_manager.render_templated_text = _boom
-    with pytest.raises(RuntimeError, match="resource manager down"):
+    with pytest.raises(type(fault)) as caught:
         await api_keys.validate_condition(_req(body={"condition": _cond(".policy.limit")}))
+    assert caught.value is fault
 
 
 async def test_validate_condition_never_persists(store: _Fakes, bound_app: Any) -> None:

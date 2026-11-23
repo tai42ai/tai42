@@ -96,6 +96,27 @@ def test_validate_redirect_uri_rejects_http_for_non_local():
         client.validate_redirect_uri("http://app.example.com/cb")
 
 
+def _allowlist(monkeypatch, origins: str) -> None:
+    from tai42_kit.settings import reset_all_settings
+
+    monkeypatch.setenv("CONNECTORS_REDIRECT_URI_ALLOWLIST", origins)
+    reset_all_settings()
+
+
+def test_validate_redirect_uri_rejects_http_for_a_local_looking_name(monkeypatch):
+    # ``evil.local`` is a name anyone can register, not this machine: http is refused
+    # even when the origin is allow-listed.
+    _allowlist(monkeypatch, "http://evil.local")
+    with pytest.raises(RedirectUriNotAllowedError, match="https"):
+        client.validate_redirect_uri("http://evil.local/cb")
+
+
+@pytest.mark.parametrize("uri", ["http://127.0.0.2/cb", "http://[::1]:5173/cb", "http://LOCALHOST:5173/cb"])
+def test_validate_redirect_uri_accepts_http_on_any_loopback_host(monkeypatch, uri):
+    _allowlist(monkeypatch, "http://127.0.0.2,http://[::1]:5173,http://LOCALHOST:5173")
+    assert client.validate_redirect_uri(uri) == uri
+
+
 def test_validate_redirect_uri_rejects_origin_not_in_allowlist():
     with pytest.raises(RedirectUriNotAllowedError, match="not in the allow-list"):
         client.validate_redirect_uri("https://evil.example.com/cb")

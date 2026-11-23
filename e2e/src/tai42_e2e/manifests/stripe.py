@@ -38,7 +38,7 @@ def build_stripe_stack(res: StackResources, variants: Variants) -> StackConfig:
     before boot, and the FakeStripe stub's origin, the two secrets and the api key ride in
     as resources.
 
-    ``INTERACTIONS_PUBLIC_BASE_URL`` is filled at boot with replica B's origin so the
+    ``TAI_PUBLIC_BASE_URL`` is filled at boot with replica B's origin so the
     callback URL the platform mints is DIALABLE by the bridge running inside the stack (the
     bridge pins every answer POST against the callback prefix the platform mints from this same
     value). The callback rate-limit windows are
@@ -119,7 +119,7 @@ def build_stripe_stack(res: StackResources, variants: Variants) -> StackConfig:
         # by the bridge, and the callback pin's prefix is minted from this same value. Real Stripe
         # delivers ``checkout.session.completed`` to the public origin, so the callback the
         # bridge answers is minted there instead of loopback.
-        replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
-        public_base_url_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"] if stripe_real else [],
+        replica_b_origin_env_keys=["TAI_PUBLIC_BASE_URL"],
+        public_base_url_env_keys=["TAI_PUBLIC_BASE_URL"] if stripe_real else [],
         public_base_url=switch.public_base_url,
     )

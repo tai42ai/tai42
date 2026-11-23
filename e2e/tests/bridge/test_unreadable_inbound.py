@@ -5,8 +5,6 @@ The user reads "That message could not be read. Please send it again." once, the
 2xx so the vendor stops redelivering:
 - a whatsapp completed-form reply (``nfm_reply``) whose ``response_json`` is not a JSON object; a
   redelivery of the same message sends no second notice;
-- a telegram button tap whose token no live question holds and whose message carries no keyboard
-  to read the tapped label from;
 - a message whose text is blank on whatsapp (with a question pending, which stays open for the next
   reply), telegram or slack.
 
@@ -91,24 +89,6 @@ async def test_whatsapp_form_reply_without_a_json_object_is_rejected_unreadable_
         return sent if len(sent) > before else None
 
     await wait_absent_async(_second_notice, window=3.0, message="a redelivered unreadable reply sent a second notice")
-
-
-@pytest.mark.needs("kind:channels:telegram", "helper:telegram")
-async def test_telegram_tap_without_a_readable_label_is_rejected_unreadable(
-    media_bridge: BridgeHarness, uniq: Callable[[str], str]
-) -> None:
-    chat_id = "970001"
-    tap = media_bridge.telegram_callback_query(chat_id=chat_id, message_id=97001, data=uniq("tg-unheld"))
-    await assert_rejected(
-        media_bridge,
-        uniq,
-        inbound_path=TELEGRAM_INBOUND_PATH,
-        inbound=tap,
-        fake=media_bridge.fake_telegram,
-        recipient=chat_id,
-        recipient_field="chat_id",
-        reason="unreadable",
-    )
 
 
 @pytest.mark.needs("kind:channels:whatsapp", "kind:interactions", "helper:whatsapp")

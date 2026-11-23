@@ -43,6 +43,7 @@ from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import interactions as interaction_ops
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
+from .._helpers import set_public_base_url
 from .conftest import LuaEnv, _channel_route, create_record, keys_naming
 
 _IDENTITY = "+15550001111"
@@ -109,9 +110,8 @@ class _AskChannel(AddressingChannel):
 def interactions(monkeypatch, fake_redis, fake_client_ctx):
     """The interaction store, every door that touches it pointed at the one interactions fake."""
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
-    settings = InteractionsSettings(
-        public_base_url="https://cb.example", delivery_max_attempts=3, delivery_retry_backoff_seconds=0.01
-    )
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings(delivery_max_attempts=3, delivery_retry_backoff_seconds=0.01)
     for module in (helper_module, _router(), continuation_module, interaction_ops):
         monkeypatch.setattr(module, "client_ctx", fake_client_ctx)
         monkeypatch.setattr(module, "interactions_settings", lambda: settings)

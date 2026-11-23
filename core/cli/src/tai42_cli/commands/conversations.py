@@ -224,6 +224,13 @@ def create_route(
             help="Notice for an inbound message the channel could not read. Unset sends the built-in English text.",
         ),
     ] = None,
+    reply_rejected_choice_unavailable: Annotated[
+        str | None,
+        typer.Option(
+            "--reply-rejected-choice-unavailable",
+            help="Notice for a tap on a choice the channel can no longer read. Unset sends the built-in English text.",
+        ),
+    ] = None,
     locale: Annotated[
         str | None,
         typer.Option(
@@ -330,6 +337,7 @@ def create_route(
             "rejected_too_large": reply_rejected_too_large,
             "rejected_could_not_receive": reply_rejected_could_not_receive,
             "rejected_unreadable": reply_rejected_unreadable,
+            "rejected_choice_unavailable": reply_rejected_choice_unavailable,
         }
     )
     if reply_texts:

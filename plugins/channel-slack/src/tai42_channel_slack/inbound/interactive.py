@@ -20,7 +20,15 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import InboundAnswerOutcome, InboundBridge
-from tai42_contract.interactions import FieldChangedEvent, FormReactionError, SubmittedEvent
+from tai42_contract.interactions import (
+    FieldChangedEvent,
+    FormReactionError,
+    FormShapeError,
+    FormShapeKind,
+    QuestionFormat,
+    SubmittedEvent,
+)
+from tai42_kit.interactions import offered_picks
 from tai42_kit.utils.data.form_text import render_form_text
 
 from tai42_channel_slack.blocks import decode_reply_value, is_option_tap, is_reply_action
@@ -31,6 +39,7 @@ from tai42_channel_slack.form_blocks import FIELD_ACTION_ID, FormSchemaError
 from tai42_channel_slack.forms import (
     FORM_OPEN_ACTION_ID,
     FORM_SUBMIT_CALLBACK_ID,
+    ModalMetadata,
     build_modal_view,
     decode_private_metadata,
     first_field_name,
@@ -336,6 +345,85 @@ def _normalize_options(option_list: list[Any]) -> list[dict[str, Any]]:
     return normalized
 
 
+def _with_update_values(base: dict[str, Any], values_update: dict[str, Any]) -> dict[str, Any]:
+    """``base`` with a reaction's ``values`` laid over it: a ``None`` value removes its field, any other sets it."""
+    merged = {**base, **values_update}
+    return {name: value for name, value in merged.items() if value is not None}
+
+
+def _fold_update_lists(
+    update: dict[str, Any],
+    merged_options: dict[str, Any],
+    meta_options: dict[str, Any],
+    merged_display: dict[str, Any],
+    meta_display: dict[str, Any],
+) -> None:
+    """Fold a reaction update's replaced option lists and filled display slots into the modal state.
+
+    Each lands in both the render map and its ``private_metadata`` carrier, so it survives the
+    next re-render.
+    """
+    for name, option_list in (update.get("options") or {}).items():
+        normalized = _normalize_options(option_list)
+        merged_options[name] = normalized
+        meta_options[name] = normalized
+    for slot, value in (update.get("display") or {}).items():
+        merged_display[slot] = value
+        meta_display[slot] = value
+
+
+def _form_modal(
+    interaction_id: str,
+    record: dict[str, Any],
+    values: dict[str, Any],
+    merged_options: dict[str, Any],
+    meta_options: dict[str, Any],
+    merged_display: dict[str, Any],
+    meta_display: dict[str, Any],
+    field_errors: dict[str, Any],
+) -> dict[str, Any]:
+    """The open form modal redrawn from its record and its accumulated reaction state.
+
+    ``values`` are the entries to draw, ``field_errors`` the per-field lines under them. Raises
+    :class:`FormSchemaError` for a state Slack cannot draw.
+    """
+    return build_modal_view(
+        interaction_id,
+        record["question"],
+        record["schema"],
+        values,
+        merged_options,
+        record.get("pages"),
+        reactions=record.get("reactions"),
+        display_values=merged_display,
+        field_errors=field_errors,
+        metadata_options=meta_options or None,
+        metadata_display=meta_display or None,
+        form_wording=_form_wording(record),
+        status_unavailable=_status_wording(record).get("unavailable"),
+    )
+
+
+def _answer_question(record: dict[str, Any]) -> QuestionFormat:
+    """The FORM question the answer door checks this form's answer against, built from its record."""
+    data = record.get("data")
+    return tai42_app.interactions.question_format(
+        "form",
+        schema=record["schema"],
+        data=data or None,
+        pages=record.get("pages"),
+        reactions=record.get("reactions"),
+    )
+
+
+def _shape_sentence(record: dict[str, Any], error: FormShapeError) -> str:
+    """The sentence a field's shape error shows: the caller's ``required``/``invalid`` word, else the platform's."""
+    words = (_form_wording(record).get("fields") or {}).get(error.field)
+    member = "required" if error.kind is FormShapeKind.REQUIRED else "invalid"
+    own = words.get(member) if isinstance(words, dict) else None
+    return own if isinstance(own, str) and own else error.message
+
+
 async def _run_field_reaction(
     interaction_id: str,
     field: str,
@@ -349,7 +437,8 @@ async def _run_field_reaction(
     """Run the consumer's reaction for a changed field through the ONE reaction chokepoint.
 
     Calls ``tai42_app.interactions.react`` with the values filled so far and folds its validated
-    update into the re-render: set ``values`` are returned to overlay the render values; replaced
+    update into the re-render: ``values`` are returned to overlay the render values
+    (:func:`_with_update_values`, a ``None`` value clearing its field); replaced
     option lists and filled display slots accumulate into both the render maps and the metadata
     carriers (so they survive the next re-render); per-field ``errors`` come back to render as
     context lines. A handler failure surfaces LOUDLY — a logged exception plus a banner notice —
@@ -367,13 +456,7 @@ async def _run_field_reaction(
         logger.exception("slack interactive: reaction for form %s field %r failed", interaction_id, field)
         return {}, {}, _update_failed_text(update_failed, "")
     update = update or {}
-    for name, option_list in (update.get("options") or {}).items():
-        normalized = _normalize_options(option_list)
-        merged_options[name] = normalized
-        meta_options[name] = normalized
-    for slot, value in (update.get("display") or {}).items():
-        merged_display[slot] = value
-        meta_display[slot] = value
+    _fold_update_lists(update, merged_options, meta_options, merged_display, meta_display)
     return update.get("values") or {}, update.get("errors") or {}, None
 
 
@@ -387,9 +470,11 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
     When the field triggers a consumer reaction, its update is folded in (values/options/errors/
     display); the conditional show/hide is re-evaluated here (platform logic, never a consumer
     call) because the rebuilt blocks hide the fields their predicate hides for the new values.
-    A view the plugin did not stamp, or whose record lapsed, is acked without a re-render. A
-    reaction update the modal cannot draw (a value past a Slack cap) is handled as a failing
-    reaction: a logged exception and the failure banner over the pre-reaction modal.
+    An entered pick a replaced choice list no longer offers is dropped before the reaction's own
+    values are laid on (:func:`~tai42_kit.interactions.offered_picks`). A view the plugin did not
+    stamp, or whose record lapsed, is acked without a re-render. A reaction update the modal cannot draw (a value
+    past a Slack cap, or outside its own choice list) is handled as a failing reaction: a logged
+    exception and the failure banner over the pre-reaction modal.
     """
     view = payload.get("view")
     if not isinstance(view, dict):
@@ -435,20 +520,9 @@ async def _handle_form_field_action(payload: dict[str, Any], action: dict[str, A
         )
 
     def render() -> dict[str, Any]:
-        return build_modal_view(
-            interaction_id,
-            record["question"],
-            schema,
-            {**entered, **values_update},
-            merged_options,
-            record.get("pages"),
-            reactions=reactions,
-            display_values=merged_display,
-            field_errors=field_errors,
-            metadata_options=meta_options or None,
-            metadata_display=meta_display or None,
-            form_wording=_form_wording(record),
-            status_unavailable=_status_wording(record).get("unavailable"),
+        values = _with_update_values(offered_picks(entered, merged_options), values_update)
+        return _form_modal(
+            interaction_id, record, values, merged_options, meta_options, merged_display, meta_display, field_errors
         )
 
     try:
@@ -488,11 +562,10 @@ def _submitted_errors_response(schema: dict[str, Any], errors: dict[str, Any], f
 
 
 async def _run_submitted_reaction(
-    interaction_id: str,
+    record: dict[str, Any],
+    metadata: ModalMetadata,
     answer: dict[str, Any],
-    schema: dict[str, Any],
     first_block: str,
-    update_failed: str | None,
 ) -> JSONResponse | None:
     """Run the consumer's ``submitted`` check through the ONE reaction chokepoint.
 
@@ -500,9 +573,19 @@ async def _run_submitted_reaction(
     reports per-field errors or itself fails — a handler failure surfaces LOUDLY as an inline
     error plus a logged exception, never a silently accepted answer; the inline error is the
     caller's ``update_failed`` template (a :class:`FormReactionError`'s ``reason`` fills its
-    ``{reason}``, any other failure leaves it empty), else the platform line. Returns ``None`` when
-    the check passes, having folded any finalized values into ``answer`` for the forward.
+    ``{reason}``, any other failure leaves it empty), else the platform line.
+
+    A clean check that replaces lists or sets values is folded into ``answer`` as the field-change
+    door folds one: a pick a replaced list no longer offers is dropped
+    (:func:`~tai42_kit.interactions.offered_picks`), then the update's values are laid on. The folded
+    answer is checked again with the answer door's own shape check; a broken shape keeps the modal
+    open, redrawn (``response_action: "update"``) with the new lists and each failing field's
+    sentence under it (:func:`_shape_sentence`). An update the modal cannot draw there takes the
+    failure line as the inline error. Returns ``None`` when the answer may be forwarded.
     """
+    interaction_id = metadata.interaction_id
+    schema = record["schema"]
+    update_failed = _form_wording(record).get("update_failed")
     try:
         update = await tai42_app.interactions.react(interaction_id, SubmittedEvent(), answer)
     except FormReactionError as exc:
@@ -515,7 +598,30 @@ async def _run_submitted_reaction(
     errors = update.get("errors") or {}
     if errors:
         return _submitted_errors_response(schema, errors, first_block)
-    answer.update(update.get("values") or {})
+    values_update = update.get("values") or {}
+    if not values_update and not update.get("options"):
+        return None
+    meta_options, meta_display = dict(metadata.options), dict(metadata.display)
+    merged_options: dict[str, Any] = {**((record.get("data") or {}).get("options") or {}), **meta_options}
+    merged_display: dict[str, Any] = dict(meta_display)
+    _fold_update_lists(update, merged_options, meta_options, merged_display, meta_display)
+    folded = _with_update_values(offered_picks(answer, merged_options), values_update)
+    shape_errors = tai42_app.interactions.form_shape_errors(_answer_question(record), folded)
+    if shape_errors:
+        field_errors = {error.field: _shape_sentence(record, error) for error in shape_errors}
+        try:
+            view = _form_modal(
+                interaction_id, record, folded, merged_options, meta_options, merged_display, meta_display, field_errors
+            )
+        except FormSchemaError:
+            logger.exception(
+                "slack interactive: submitted reaction for form %s returned an update the modal cannot draw",
+                interaction_id,
+            )
+            return _errors_response(first_block, _update_failed_text(update_failed, ""))
+        return JSONResponse({"response_action": "update", "view": view})
+    answer.clear()
+    answer.update(folded)
     return None
 
 
@@ -557,10 +663,8 @@ async def _handle_view_submission(payload: dict[str, Any]) -> Response:
     if reactions and reactions.get("submitted"):
         # The consumer's final check runs on submit (it owns membership for any reaction-fed
         # choice list). Its per-field errors keep the modal open as inline errors; a clean
-        # check may finalize values before the answer is forwarded.
-        submitted = await _run_submitted_reaction(
-            interaction_id, answer, schema, first_block, _form_wording(record).get("update_failed")
-        )
+        # check may replace lists or finalize values before the answer is forwarded.
+        submitted = await _run_submitted_reaction(record, metadata, answer, first_block)
         if submitted is not None:
             return submitted
 

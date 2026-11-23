@@ -18,7 +18,7 @@ import pytest
 from fastmcp import Context
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_kit.backend import CallbackSchema, callback_execution, carry_forwarded_fire, prepare_backend_kwargs
 from tai42_kit.backend.settings import BackendDispatchSettings
@@ -49,13 +49,18 @@ _FORWARDED = {
 
 
 class _FakeResourceManager:
-    """Returns inline content unchanged and resolves a stored id from a map."""
+    """Returns inline content unchanged and resolves a stored id from a map.
+
+    An unknown id raises the seam's ``TemplateNotFoundError``.
+    """
 
     def __init__(self) -> None:
         self.templates: dict[str, str] = {}
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
+            if text.id not in self.templates:
+                raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
             return self.templates[text.id]
         assert text.content is not None
         return text.content

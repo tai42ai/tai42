@@ -17,7 +17,7 @@ import pytest
 from fastmcp.utilities.types import Image
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_contract.storage import ObjectStat, Storage
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplateBodyError, TemplatedText
 
 import tai42_skeleton.operations.resources as resources_ops
 from tai42_skeleton.operations import (
@@ -141,17 +141,16 @@ async def test_rejects_traversal_id(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_broken_jinja_is_bad_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    from jinja2 import TemplateSyntaxError
-
     manager = _ResourceManager(loaded="{{ oops")
     _bind(monkeypatch, manager)
 
     async def _broken(text, locale=None) -> str:
-        raise TemplateSyntaxError("unexpected end of template", 1)
+        raise TemplateBodyError("is not a renderable template: unexpected end of template")
 
     monkeypatch.setattr(manager, "render_templated_text", _broken)
-    with pytest.raises(BadRequestError, match="template error"):
+    with pytest.raises(BadRequestError) as caught:
         await get_resource_by_id("t.j2", {})
+    assert str(caught.value) == "resource 't.j2' is not a renderable template: unexpected end of template"
 
 
 class _BytesStorage(Storage):

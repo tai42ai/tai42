@@ -29,7 +29,6 @@ import { EntryCodesTable } from './EntryCodesTable';
 import { MintEntryCodeDialog } from './MintEntryCodeDialog';
 import { getMountBase } from './mount-base';
 import { panelQueryClient } from './query-client';
-import { RevokeCodeDialog } from './RevokeCodeDialog';
 import { useEntryGate } from './useEntryGate';
 
 const headerStyle: CSSProperties = {
@@ -179,17 +178,28 @@ function GatePanel({
         </ConfirmDialog>
       ) : null}
       {pendingRevoke !== null ? (
-        <RevokeCodeDialog
-          isError={revokeMutation.isError}
-          error={revokeMutation.error}
+        <ConfirmDialog
+          title="Revoke entry code"
+          confirmLabel="Revoke code"
+          pendingLabel="Revoking"
+          confirmVariant="danger"
           isPending={revokeMutation.isPending}
-          onCancel={() => {
-            setPendingRevoke(null);
+          failure={{
+            error: revokeMutation.isError ? revokeMutation.error : null,
+            scope: 'revoke code',
           }}
           onConfirm={() => {
             revokeMutation.mutate(pendingRevoke);
           }}
-        />
+          onClose={() => {
+            setPendingRevoke(null);
+          }}
+        >
+          <p style={{ margin: 0 }}>
+            Revoke this code? Its chat link stops working immediately and cannot be restored — a new
+            code means revoke and mint.
+          </p>
+        </ConfirmDialog>
       ) : null}
     </Card>
   );

@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateRenderError
 
 
 async def render_templated_text(text: TemplatedText, locale: str | None = None) -> str:
@@ -20,8 +20,9 @@ async def render_templated_text(text: TemplatedText, locale: str | None = None) 
 
     The source is the stored resource it names by ``id``, or its inline ``content``.
     ``locale`` selects the stored resource's locale variant and reaches the render as its
-    language. A missing resource, or a template the engine cannot render, raises out of
-    the manager.
+    language. A text that cannot be rendered as authored raises the manager's
+    :class:`~tai42_contract.template.TemplateRenderError`; every other failure (the store,
+    the network, the manager's own code) propagates as itself.
     """
     return await tai42_app.storage.resource_manager.render_templated_text(text, locale)
 
@@ -44,12 +45,12 @@ async def resolve_schema_body(
     no behaviour change for an inline author). A :class:`~tai42_contract.template.TemplatedText`
     names the schema by stored ``id`` (or carries it inline as ``content``): it is RENDERED
     through the resource manager, its rendered text is PARSED as JSON, and the result must be a
-    JSON object — the same object precondition an inline schema meets. A render failure, a parse
-    failure, or a non-object result each raises :class:`SchemaBodyError` LOUDLY naming ``field``
-    (and the stored ``id`` when it is by-id); none falls back to an empty schema, accepts the raw
-    text, or skips the caller's own JSON-Schema validation that follows on the returned dict.
-    ``None`` resolves to ``None`` (the unset body). ``locale`` selects a stored resource's locale
-    variant.
+    JSON object — the same object precondition an inline schema meets. A text the manager cannot
+    render as authored, a parse failure, or a non-object result each raises :class:`SchemaBodyError`
+    LOUDLY naming ``field`` (and the stored ``id`` when it is by-id); none falls back to an empty
+    schema, accepts the raw text, or skips the caller's own JSON-Schema validation that follows on
+    the returned dict. Any other failure of the render propagates as itself. ``None`` resolves to
+    ``None`` (the unset body). ``locale`` selects a stored resource's locale variant.
     """
     if value is None:
         return None
@@ -58,8 +59,8 @@ async def resolve_schema_body(
     where = f"stored id {value.id!r}" if value.id is not None else "inline templated content"
     try:
         rendered = await render_templated_text(value, locale)
-    except Exception as exc:
-        raise SchemaBodyError(f"{field}: its {where} could not be rendered: {exc}") from exc
+    except TemplateRenderError as exc:
+        raise SchemaBodyError(f"{field} {exc}") from exc
     try:
         parsed = json.loads(rendered)
     except json.JSONDecodeError as exc:
@@ -84,21 +85,21 @@ async def resolve_text_body(field: str, value: TemplatedText | str | None, *, lo
     """Resolve an authored text body — the ``TemplatedText | str`` union — to its text.
 
     A ``str`` is the text itself; a :class:`~tai42_contract.template.TemplatedText` is RENDERED
-    through the resource manager (its stored ``id`` or inline ``content``). A render failure raises
-    :class:`TextBodyError` naming ``field`` (and the stored ``id`` when it is by-id), and so does an
-    empty or whitespace-only text: the unset state is ``None``. ``None`` resolves to ``None``.
-    ``locale`` selects a stored resource's locale variant.
+    through the resource manager (its stored ``id`` or inline ``content``). A text the manager cannot
+    render as authored raises :class:`TextBodyError` naming ``field`` (and the stored ``id`` when it
+    is by-id), and so does an empty or whitespace-only text: the unset state is ``None``. Any other
+    failure of the render propagates as itself. ``None`` resolves to ``None``. ``locale`` selects a
+    stored resource's locale variant.
     """
     if value is None:
         return None
     if isinstance(value, str):
         text = value
     else:
-        where = f"stored id {value.id!r}" if value.id is not None else "inline templated content"
         try:
             text = await render_templated_text(value, locale)
-        except Exception as exc:
-            raise TextBodyError(f"{field}: its {where} could not be rendered: {exc}") from exc
+        except TemplateRenderError as exc:
+            raise TextBodyError(f"{field} {exc}") from exc
     if not text.strip():
         raise TextBodyError(f"{field} is empty; send null to clear it")
     return text

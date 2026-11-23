@@ -12,7 +12,14 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from tai42_contract.channels import Correlation
 
-from tai42_channel_telegram.correlation import StoredOption, get_options, scoped_correlation_key, set_options
+from tai42_channel_telegram.correlation import (
+    StoredOption,
+    already_seen,
+    get_options,
+    mark_seen,
+    scoped_correlation_key,
+    set_options,
+)
 from tai42_channel_telegram.correlation import telegram_correlation_store as store
 
 _CALLBACK = "https://example.test/api/interactions/callback/tkt"
@@ -148,3 +155,12 @@ async def test_default_namespace_redis_url_configures_the_store(fake_redis, monk
 
     # The resolved setting falls back to the default namespace, so the gate passes.
     assert await store.get_correlation("99") is None
+
+
+async def test_seen_round_trip_uses_dedupe_ttl(fake_redis):
+    assert await already_seen("4242:rejected") is False
+
+    await mark_seen("4242:rejected")
+
+    assert await already_seen("4242:rejected") is True
+    assert fake_redis.ttls["channel:telegram:seen:4242:rejected"] == 172_800

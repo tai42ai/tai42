@@ -11,7 +11,7 @@ import pytest
 from arq.jobs import JobStatus
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.interactions import SuspendedInteraction
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.backend import CallbackSchema, callback_execution, prepare_backend_kwargs
 from tai42_kit.settings.cache_registry import reset_all_settings
 from tai42_kit.utils.data import JqBudgetExceededError
@@ -335,7 +335,7 @@ async def test_rendered_condition_unknown_id_raises(stub_app) -> None:
     # A by-id condition whose id resolves to nothing raises loudly instead of
     # silently rendering an empty condition.
     cb = CallbackSchema(condition=TemplatedText(id="missing"))
-    with pytest.raises(KeyError):
+    with pytest.raises(TemplateNotFoundError, match="which could not be fetched"):
         await cb.rendered_condition()
 
 

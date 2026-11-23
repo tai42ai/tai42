@@ -15,7 +15,7 @@ import asyncio
 import pytest
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_agents._internal.reject import reject_untitled_response_format, resolve_response_format
@@ -95,9 +95,7 @@ class _RFResourceManager:
     async def render_templated_text(self, text: TemplatedText, locale=None):
         if text.id is not None:
             if text.id not in _RF_RESOURCES:
-                # The real manager raises TemplateNotFoundError; this package does not import the
-                # skeleton, so a plain lookup failure stands in — the resolver catches it loudly.
-                raise LookupError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
             return _RF_RESOURCES[text.id]
         assert text.content is not None
         return text.content
@@ -132,7 +130,7 @@ def test_resolve_response_format_by_id_unfetchable_fails_loudly() -> None:
         with tai42_app.bound(_RFApp()):
             await resolve_response_format("agent", TemplatedText(id="missing-rf"))
 
-    with pytest.raises(SchemaBodyError, match="could not be rendered"):
+    with pytest.raises(SchemaBodyError, match="which could not be fetched: not stored"):
         asyncio.run(_run())
 
 

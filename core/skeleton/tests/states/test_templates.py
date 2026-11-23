@@ -610,7 +610,7 @@ async def test_input_program_reference_cycle_is_a_loud_refusal() -> None:
 
 
 async def test_non_compiling_program_jq_is_refused() -> None:
-    with pytest.raises(TemplateValidationError, match="template_jq 'bad' jq is not a valid jq"):
+    with pytest.raises(TemplateValidationError, match="template_jq 'bad' is not a valid jq"):
         await validate_template(
             _planner_doc(template_jq={"bad": {"purpose": "input", "jq": {"content": "this is (not jq"}}})
         )
@@ -721,7 +721,7 @@ async def test_update_may_write_any_regime_including_single() -> None:
 
 
 async def test_non_compiling_update_jq_is_refused() -> None:
-    with pytest.raises(TemplateValidationError, match="template_jq 'bad' jq is not a valid jq"):
+    with pytest.raises(TemplateValidationError, match="template_jq 'bad' is not a valid jq"):
         await validate_template(
             _planner_doc(
                 template_jq={"bad": {"purpose": "update", "writes": [["ledger"]], "jq": {"content": "this is (not jq"}}}

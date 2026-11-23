@@ -645,6 +645,26 @@ def test_delete_unregisters_base_and_branches_emits(pg, emit):
     asyncio.run(run())
 
 
+def test_delete_whose_cascade_fails_answers_the_cascade_failure_as_a_500(pg, emit):
+    async def _cleanup_boom(_name: str) -> None:
+        raise RuntimeError("cleanup store unreadable")
+
+    async def run():
+        async with instance.app.app_context(_manifest()):
+            await _create_versioned("wv", base_tool="echo", fixed_kwargs={})
+            instance.app.tools.register_delete_cascade(_cleanup_boom)
+
+            resp = await router.delete_preset(_request("DELETE", "/api/presets/wv", name="wv"))
+
+            assert resp.status_code == 500
+            assert json.loads(bytes(resp.body)) == {
+                "error": "preset 'wv' cannot be deleted — a delete cascade failed for 'wv': cleanup store unreadable"
+            }
+            assert instance.app.preset_manager.is_registered("wv")
+
+    asyncio.run(run())
+
+
 def test_delete_absent_404(pg, emit):
     async def run():
         async with instance.app.app_context(_manifest()):

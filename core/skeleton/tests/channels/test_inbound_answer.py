@@ -38,7 +38,8 @@ from tai42_skeleton.channels.inbound import (
     handle_inbound_answer,
 )
 from tai42_skeleton.hooks import cache as hooks_cache
-from tai42_skeleton.interactions.settings import InteractionsSettings
+
+from .._helpers import set_public_base_url
 
 _CALLBACK_URL = "https://host.example/api/interactions/callback/tkt"
 _INTERACTION_ID = "int-42"
@@ -509,7 +510,7 @@ async def test_400_retryable_notify_failure_is_swallowed(monkeypatch):
 
 def _pin_public_base(monkeypatch, base: str | None) -> None:
     """Point the handler's host-pinning at ``base`` (the configured public base)."""
-    monkeypatch.setattr(inbound_module, "interactions_settings", lambda: InteractionsSettings(public_base_url=base))
+    set_public_base_url(monkeypatch, base)
 
 
 # -- security carry-in (a): callback_url host pinning ----------------------------

@@ -34,6 +34,7 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.monitoring import init_monitoring, reset_monitoring
 
 from .._fakes.recording_monitoring import RecordingMonitoring
+from .._helpers import set_public_base_url
 
 
 class _FlakyChannel(AddressingChannel):
@@ -94,8 +95,8 @@ def register_channel():
 
 async def test_one_span_per_delivery_attempt(monkeypatch, fake_client_ctx, driver, backend, register_channel):
     backend.writer.active_trace_id = "trace-1"
+    set_public_base_url(monkeypatch, "https://host.example")
     settings = InteractionsSettings(
-        public_base_url="https://host.example",
         delivery_max_attempts=3,
         delivery_retry_backoff_seconds=0.01,
     )
@@ -144,7 +145,8 @@ class _RecordingChannel(AddressingChannel):
 async def test_the_delivered_frame_carries_the_asks_sensitive(
     monkeypatch, fake_client_ctx, driver, register_channel, sensitive
 ):
-    settings = InteractionsSettings(public_base_url="https://host.example")
+    set_public_base_url(monkeypatch, "https://host.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     channel = register_channel("recording", _RecordingChannel())

@@ -16,13 +16,14 @@ both roles with schemas that differ between the modes is split into pydantic's
 ``-Input`` / ``-Output`` components automatically, and each ``$ref`` resolves to the
 component for its role; a model used in one mode keeps its bare name.
 
-The two sources of a ``503`` are kept apart, because they answer with different
+The three sources of a ``503`` are kept apart, because they answer with different
 bodies. A route's ``error_statuses`` are the statuses it answers with the plain
 ``{"error": ...}`` envelope, so a declared ``503`` (an operation's
-``UnavailableError``) documents that envelope. The reload gate is the OTHER source:
-it is declared as ``reload_gated`` and this module owns its response entirely — the
-constant-message ``ReloadingError`` body plus the ``Retry-After`` header. A route
-carrying BOTH publishes a ``503`` admitting either body.
+``UnavailableError``) documents that envelope. The other two are declared by flags and
+this module owns their shapes: the reload gate (``reload_gated``) answers the
+constant-message ``ReloadingError`` body plus the ``Retry-After`` header, and the
+leaving refusal (``answers_leaving``) answers the ``LeavingError`` body naming why the
+worker leaves. A route carrying several publishes one ``503`` admitting each of its bodies.
 
 Emission is OFFLINE by construction: the registry is populated purely by
 importing the router modules, so no database, Redis, or live config/manifest is
@@ -61,6 +62,7 @@ _SERIALIZATION: JsonSchemaMode = "serialization"
 # Shared response-envelope component schemas.
 _ERROR_SCHEMA = "Error"
 _RELOADING_ERROR_SCHEMA = "ReloadingError"
+_LEAVING_ERROR_SCHEMA = "LeavingError"
 
 _PATH_PARAM = re.compile(r"\{([^}:]+)(?::([^}]+))?\}")
 
@@ -85,16 +87,13 @@ _STATUS_DESCRIPTIONS: dict[int, str] = {
     415: "Unsupported media type.",
     422: "Request failed validation.",
     500: "Internal server error.",
-    503: "The server cannot serve this request right now; retry shortly.",
 }
 
-# The reload gate's own ``503`` — a different body from the typed ``503`` above, so
-# it carries its own description. A route that answers both publishes the combined
-# one.
-_RELOADING_DESCRIPTION = "The server is applying a config reload; retry shortly."
-_RELOADING_OR_UNAVAILABLE_DESCRIPTION = (
-    "The server is applying a config reload, or cannot serve this request right now; retry shortly."
-)
+# What each ``503`` body says happened, in the order a route's one ``503`` slot lists its
+# bodies; the slot's description names the reason of each body it admits.
+_UNAVAILABLE_REASON = "the server cannot serve this request right now"
+_RELOADING_REASON = "the server is applying a config reload"
+_LEAVING_REASON = "this worker is leaving and begins no change"
 
 
 def _openapi_path(path: str) -> str:
@@ -134,7 +133,7 @@ def _operation_id(method: str, path: str) -> str:
 
 # Envelope schema names the emitter reserves for the shared ``{"error": ...}`` and
 # reloading responses; a request/response model may never claim one.
-_RESERVED_SCHEMA_NAMES = frozenset({_ERROR_SCHEMA, _RELOADING_ERROR_SCHEMA})
+_RESERVED_SCHEMA_NAMES = frozenset({_ERROR_SCHEMA, _RELOADING_ERROR_SCHEMA, _LEAVING_ERROR_SCHEMA})
 
 
 def _assign_component(components: dict[str, Any], name: str, schema: dict[str, Any]) -> None:
@@ -359,56 +358,65 @@ def _success_response(meta: RouteMetadata, method: str, schemas: _ComponentSchem
 def _error_response(status: int) -> dict[str, Any]:
     """The response for a status the route answers with the plain ``{"error": ...}`` envelope.
 
-    Covers every entry of ``error_statuses``, the declared ``503`` included.
+    Covers every entry of ``error_statuses`` but ``503``, which ``_unavailable_response`` publishes.
     """
     return {
         "description": _STATUS_DESCRIPTIONS.get(status, "Error."),
-        "content": {"application/json": {"schema": {"$ref": f"#/components/schemas/{_ERROR_SCHEMA}"}}},
+        "content": {"application/json": {"schema": {"$ref": f"{_REF_PREFIX}{_ERROR_SCHEMA}"}}},
     }
 
 
-def _reload_gate_response(*, also_unavailable: bool) -> dict[str, Any]:
-    """The reload gate's ``503``: the constant-message ``ReloadingError`` body plus the ``Retry-After`` header.
+def _unavailable_response(meta: RouteMetadata) -> dict[str, Any] | None:
+    """The route's one ``503`` slot, admitting the body of every source of a ``503`` it carries.
 
-    The ``Retry-After`` header is the one the gate stamps.
-    ``also_unavailable`` marks a route that ALSO answers a typed ``UnavailableError``
-    ``503`` with the plain ``{"error": ...}`` envelope; its one ``503`` slot must then
-    admit either body, and ``Retry-After`` rides only the reloading half.
-
-    The combined schema is ``anyOf``, not ``oneOf``: ``Error`` is open (it constrains
-    only ``error``), so a reloading body satisfies BOTH branches — under ``oneOf``,
-    which demands exactly one match, the gate's own response would fail its own spec.
+    The sources: a declared ``503`` (``503`` in ``error_statuses``) answers the plain ``Error``
+    envelope; the reload gate (``reload_gated``) the constant-message ``ReloadingError`` body plus
+    the ``Retry-After`` header it stamps; the leaving refusal (``answers_leaving``) the
+    ``LeavingError`` body. One source publishes its body's ``$ref``; several publish ``anyOf`` —
+    not ``oneOf``: ``Error`` is open (it constrains only ``error``), so a reloading or leaving
+    body satisfies two branches, and under ``oneOf``, which demands exactly one match, the route's
+    own answer would fail its own spec. ``None`` for a route with no source.
     """
-    reloading: dict[str, Any] = {"$ref": f"#/components/schemas/{_RELOADING_ERROR_SCHEMA}"}
-    if also_unavailable:
-        schema: dict[str, Any] = {"anyOf": [reloading, {"$ref": f"#/components/schemas/{_ERROR_SCHEMA}"}]}
-        description = _RELOADING_OR_UNAVAILABLE_DESCRIPTION
-        header_description = "Seconds to wait before retrying; carried by the reloading answer."
-    else:
-        schema = reloading
-        description = _RELOADING_DESCRIPTION
-        header_description = "Seconds to wait before retrying."
-    return {
-        "description": description,
-        "headers": {"Retry-After": {"description": header_description, "schema": {"type": "integer"}}},
-        "content": {"application/json": {"schema": schema}},
+    sources = [
+        (shape, reason)
+        for shape, reason, present in (
+            (_ERROR_SCHEMA, _UNAVAILABLE_REASON, 503 in meta.error_statuses),
+            (_RELOADING_ERROR_SCHEMA, _RELOADING_REASON, meta.reload_gated),
+            (_LEAVING_ERROR_SCHEMA, _LEAVING_REASON, meta.answers_leaving),
+        )
+        if present
+    ]
+    if not sources:
+        return None
+    refs: list[dict[str, Any]] = [{"$ref": f"{_REF_PREFIX}{shape}"} for shape, _ in sources]
+    reasons = ", or ".join(reason for _, reason in sources)
+    response: dict[str, Any] = {
+        "description": f"{reasons[0].upper()}{reasons[1:]}; retry shortly.",
+        "content": {"application/json": {"schema": refs[0] if len(refs) == 1 else {"anyOf": refs}}},
     }
+    if meta.reload_gated:
+        header_description = "Seconds to wait before retrying."
+        if len(refs) > 1:
+            header_description = "Seconds to wait before retrying; carried by the reloading answer."
+        response["headers"] = {"Retry-After": {"description": header_description, "schema": {"type": "integer"}}}
+    return response
 
 
 def _operation_responses(meta: RouteMetadata, method: str, schemas: _ComponentSchemas) -> dict[str, Any]:
     """The operation's ``responses`` map.
 
-    Covers the success status, any additional success statuses, the plain-envelope error statuses,
-    and — merged into the ``503`` slot, OVERWRITING a declared 503 so one slot admits both bodies —
-    the reload gate's response when the route is ``reload_gated``.
+    Covers the success status, any additional success statuses, the plain-envelope error statuses
+    other than ``503``, and the one ``503`` slot admitting every ``503`` body the route answers.
     """
     responses: dict[str, Any] = {str(meta.success_status): _success_response(meta, method, schemas)}
     for status in meta.additional_success_statuses:
         responses[str(status)] = _success_response(meta, method, schemas)
     for status in meta.error_statuses:
-        responses[str(status)] = _error_response(status)
-    if meta.reload_gated:
-        responses["503"] = _reload_gate_response(also_unavailable=503 in meta.error_statuses)
+        if status != 503:
+            responses[str(status)] = _error_response(status)
+    unavailable = _unavailable_response(meta)
+    if unavailable is not None:
+        responses["503"] = unavailable
     return responses
 
 
@@ -550,6 +558,17 @@ def build_openapi_spec() -> dict[str, Any]:
                 "reloading": {"type": "boolean", "const": True},
             },
             "required": ["error", "reloading"],
+        },
+        _LEAVING_ERROR_SCHEMA: {
+            "type": "object",
+            "properties": {
+                "error": {"type": "string"},
+                "leaving": {
+                    "type": "string",
+                    "description": "Why the worker is leaving; the caller retries on a worker that is not leaving.",
+                },
+            },
+            "required": ["error", "leaving"],
         },
     }
 

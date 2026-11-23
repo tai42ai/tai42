@@ -88,16 +88,6 @@ async def test_startup_hook_sets_webhook(stub_app, http_recorder):
     }
 
 
-async def test_startup_hook_normalizes_trailing_slash(stub_app, http_recorder, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("CHANNEL_TELEGRAM_PUBLIC_BASE_URL", "https://example.test/")
-    reset_all_settings()
-    _import_register_module(stub_app)
-    await stub_app.lifecycle.startup_hooks[0]()
-
-    body = json.loads(http_recorder.requests[0].content)
-    assert body["url"] == "https://example.test/api/channels/telegram/inbound"
-
-
 async def test_startup_hook_follows_remapped_mount_base(stub_app, http_recorder, monkeypatch: pytest.MonkeyPatch):
     # An operator-remapped route base moves the inbound mount; setWebhook must point
     # at the resolved mount register captured at import, not the default path.
@@ -144,9 +134,8 @@ async def test_startup_hook_non_json_error_body_falls_back_to_bounded_text(stub_
 
 async def test_startup_hook_missing_public_base_url_aborts(stub_app, http_recorder, monkeypatch: pytest.MonkeyPatch):
     _import_register_module(stub_app)
-    monkeypatch.delenv("CHANNEL_TELEGRAM_PUBLIC_BASE_URL")
-    reset_all_settings()
-    with pytest.raises(ValueError, match="set CHANNEL_TELEGRAM_PUBLIC_BASE_URL"):
+    monkeypatch.setattr(stub_app.http, "public_base_url_value", None)
+    with pytest.raises(ValueError, match="set TAI_PUBLIC_BASE_URL"):
         await stub_app.lifecycle.startup_hooks[0]()
     assert http_recorder.requests == []
 

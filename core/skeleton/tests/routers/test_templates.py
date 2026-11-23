@@ -8,12 +8,12 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from jinja2 import TemplateSyntaxError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
+from tai42_contract.template import TemplateBodyError, TemplateNotFoundError
 from tai42_kit.settings import reset_all_settings
 
 import tai42_skeleton.access_control.store as ac_store_module
@@ -21,7 +21,7 @@ import tai42_skeleton.operations.templates as templates_ops
 import tai42_skeleton.routers.templates as router
 import tai42_skeleton.template.path_guard as path_guard
 from tai42_skeleton.app import instance, template_delete_referees
-from tai42_skeleton.template import ResourceManager, TemplateNotFoundError
+from tai42_skeleton.template import ResourceManager
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError
 
 from .._fakes.bus import FakeBus
@@ -436,21 +436,26 @@ async def test_clear_cache(manager):
 
 async def test_render_missing_template_404(manager, monkeypatch):
     async def _missing(text, locale=None):
-        raise TemplateNotFoundError(f"Template '{text.id}' not found.")
+        raise TemplateNotFoundError(
+            f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+        )
 
     monkeypatch.setattr(manager, "render_templated_text", _missing)
     resp = await router.render_template(_req({"text": {"id": "gone.j2"}}))
     assert resp.status_code == 404
+    assert _data(resp)["error"] == (
+        "text references stored id 'gone.j2', which could not be fetched: Template 'gone.j2' not found."
+    )
 
 
 async def test_render_bad_jinja_400(manager, monkeypatch):
     async def _broken(text, locale=None):
-        raise TemplateSyntaxError("bad syntax", 1)
+        raise TemplateBodyError("is not a renderable template: bad syntax")
 
     monkeypatch.setattr(manager, "render_templated_text", _broken)
     resp = await router.render_template(_req({"text": {"content": "{{ oops"}}))
     assert resp.status_code == 400
-    assert "template error" in _data(resp)["error"]
+    assert _data(resp)["error"] == "text is not a renderable template: bad syntax"
 
 
 async def test_render_both_content_and_id_400(manager):

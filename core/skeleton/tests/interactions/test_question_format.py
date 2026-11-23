@@ -35,6 +35,8 @@ from tai42_skeleton.interactions.answer_check import check_answer
 from tai42_skeleton.interactions.question_format import QuestionArguments, question_format
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
+from .._helpers import set_public_base_url
+
 # Imported at collection, before any test boots a manifest onto the shared app: a builtin's
 # registration decorators resolve its module against the bound app's manifest.
 with tai42_app.bound(app):
@@ -69,7 +71,8 @@ _CASES: list[tuple[str, dict[str, Any]]] = [
 @pytest.fixture(autouse=True)
 def settings(monkeypatch, fake_redis, fake_client_ctx) -> InteractionsSettings:
     monkeypatch.setenv("INTERACTIONS_REDIS_URL", "redis://localhost:6379/0")
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     return settings

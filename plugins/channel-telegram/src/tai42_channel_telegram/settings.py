@@ -1,8 +1,8 @@
 """Telegram channel settings.
 
 Two groups read the ``CHANNEL_TELEGRAM_`` prefix: :class:`TelegramSettings` (bot
-credential, recipient allowlist + default, webhook secret, public base URL, HTTP
-budget) and :class:`TelegramCorrelationSettings` (the correlation store's Redis
+credential, recipient allowlist + default, webhook secret, HTTP budget, option-tap and
+dedupe windows) and :class:`TelegramCorrelationSettings` (the correlation store's Redis
 connection). Both are exposed through ``@settings_cache`` accessors (dropped on a
 soft restart). Credentials are ``SecretStr`` (masked in repr/logs/model_dump);
 fields default ``None`` so importing never demands config, and the kit's
@@ -37,8 +37,6 @@ class TelegramSettings(TaiBaseSettings):
     # The setWebhook secret_token, echoed in X-Telegram-Bot-Api-Secret-Token; the
     # inbound door compares it constant-time and fails CLOSED when unset.
     webhook_secret: SecretStr | None = None
-    # This deployment's public base URL; the startup hook builds the webhook URL from it.
-    public_base_url: str | None = None
     # Bot API origin. Overridable so a stub can stand in (e2e); production never changes it.
     api_base_url: str = "https://api.telegram.org"
     # Wall-clock budget for one outbound HTTP call. Must be positive.
@@ -47,6 +45,8 @@ class TelegramSettings(TaiBaseSettings):
     # still resolves its option text into a bridged visitor message (a notify carries
     # no deadline of its own). A select ask uses its remaining answer budget instead.
     option_tap_ttl_seconds: int = Field(default=86_400, gt=0)
+    # How long a refused media's notice marker stays remembered (replay guard; 48h default).
+    dedupe_ttl: int = Field(default=172_800, gt=0)
 
     @field_validator("allowed_recipients", mode="before")
     @classmethod

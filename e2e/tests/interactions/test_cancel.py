@@ -24,9 +24,7 @@ import redis as redis_lib
 from tai42_e2e import wait_for_async
 from tai42_e2e.stack import TaiStack
 
-pytestmark = pytest.mark.needs(
-    "kind:interactions", "topology:replicas", "store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL"
-)
+pytestmark = pytest.mark.needs("kind:interactions", "topology:replicas", "store:redis", "setting:TAI_PUBLIC_BASE_URL")
 
 
 async def _find_pending(stack: TaiStack, port: int, question: str, *, deadline: float = 8.0) -> dict:

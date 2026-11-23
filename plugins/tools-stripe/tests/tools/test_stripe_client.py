@@ -113,7 +113,7 @@ def test_post_answer_refuses_a_callback_outside_the_platform_prefix(
 
 def test_post_answer_with_no_platform_public_base_names_the_var(stripe_env: Callable[..., None]) -> None:
     stripe_env(public_base="")
-    with pytest.raises(ValueError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+    with pytest.raises(ValueError, match="TAI_PUBLIC_BASE_URL"):
         asyncio.run(post_answer(f"{_BASE}/api/interactions/callback/tkt", {"status": "paid"}))
 
 

@@ -1,7 +1,9 @@
 """Readiness waits for the boot engine: HTTP health and the worker-bus census, read until every
 expected serve worker's presence row reads ``ready`` and every backend process has a presence row
-under its own pid, so a test acting the instant the stack fixture returns never races an incomplete
-fleet or a serve worker still in its boot gate."""
+under its own pid, so a test acting the instant the stack fixture returns finds every expected
+worker present and every serve worker past its boot-time self-resync. A later hold of a worker's
+reload gate (a sibling's join being applied, a config reload) answers ``503 reloading``, which the
+harness clients poll past."""
 
 from __future__ import annotations
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from tai42_e2e.manifests.feature_env import _base_env, _llm_env, _memory_agent_state_env
+from tai42_e2e.manifests.feature_env import PUBLIC_BASE_URL, _base_env, _llm_env, _memory_agent_state_env
 from tai42_e2e.manifests.tool_entries import (
     _CORE_ROUTERS,
     _EXTENSION_MODULES,
@@ -223,10 +223,9 @@ def build_replicas_stack(res: StackResources, variants: Variants) -> StackConfig
         env["E2E_GH_WEBHOOK_SECRET"] = res.gh_webhook_secret
     if res.stripe_webhook_secret is not None:
         env["E2E_STRIPE_WEBHOOK_SECRET"] = res.stripe_webhook_secret
-    # An external-format ``ask`` mints a callback ticket only when a public base URL
-    # is set (it builds the callback URL from it); the host is never dialed, but the
-    # setting requires an https value.
-    env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    # An external-format ``ask`` mints a callback ticket only when the deployment
+    # declares its public address (it builds the callback URL from it).
+    env["TAI_PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
     return StackConfig(
         name="replicas",
         topology=Topology.REPLICAS,
@@ -314,7 +313,7 @@ def build_caller_stack(res: StackResources, variants: Variants) -> StackConfig:
         "user_tools": ["ask", "reload_config"],
     }
     env = _base_env(res, variants)
-    env["INTERACTIONS_PUBLIC_BASE_URL"] = "https://e2e.local"
+    env["TAI_PUBLIC_BASE_URL"] = PUBLIC_BASE_URL
     env["INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS"] = "1"
     return StackConfig(
         name="caller",

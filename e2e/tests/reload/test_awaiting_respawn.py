@@ -5,7 +5,8 @@ A recycle-class value changed in the stored env outside the pipeline (a hand edi
 worker answers ``applied`` and states, in its own payload, the recycle-class keys whose value
 differs from the one it bound at boot. The worker that ran the reload command decides from
 those reports: every worker naming such a key is restarted — each backend sibling recycled
-through its supervisor, the writer's own restart its graceful exit once the reply is answered —
+through its supervisor (or, still running its own boot join, leaving once that join ended), the
+writer's own restart its graceful exit once the reply is answered —
 and the reply names that roll under ``recycle`` with the keys that caused each restart. The
 respawned workers bound the edited value at boot: the next reload names nothing and restarts
 nobody.
@@ -57,6 +58,11 @@ def _awaiting(report: dict[str, Any]) -> dict[str, list[str]]:
     return rows
 
 
+def _deferred_to_own_join(name: str) -> str:
+    """The roll row detail of a target that answered its exit is deferred to its own boot join."""
+    return f"its exit is deferred to its own in-flight change: the deployment keys of {name}"
+
+
 async def _reload(stack: TaiStack) -> dict[str, Any]:
     return await stack.api().post("/api/fleet/reload-config", json={"targets": None}, timeout=200.0)
 
@@ -84,7 +90,12 @@ async def test_a_reload_after_a_hand_edit_restarts_every_worker_reporting_the_re
     backend_rows = [row for row in roll["recycle"] if row["kind"] == "backend"]
     assert backend_rows, roll
     for row in backend_rows:
-        assert row["status"] == "recycled", row
+        # A backend still running its boot join when the roll reaches it holds its exit for that
+        # join: it answers the recycle op deferred, and leaves once its join ended.
+        if row["status"] == "self-deferred":
+            assert row["detail"].endswith(_deferred_to_own_join(row["name"])), row
+        else:
+            assert row["status"] == "recycled", row
         assert row["generation_before"] == before[row["name"]][1], (row, before)
     # A recycled worker's new life joins and restarts every sibling still reporting the key, so
     # the roll may reach a backend the join already restarted: asked once ready, that new life
@@ -96,8 +107,8 @@ async def test_a_reload_after_a_hand_edit_restarts_every_worker_reporting_the_re
     assert {row["name"] for row in backend_rows} | set(roll["skipped"]) == {
         name for name, (kind, _generation) in before.items() if kind == "backend"
     }, (roll, before)
-    writer = [row for row in roll["recycle"] if row["status"] == "self-deferred"]
-    assert [row["kind"] for row in writer] == ["serve"], roll
+    writer = [row for row in roll["recycle"] if row["status"] == "self-deferred" and row["kind"] == "serve"]
+    assert len(writer) == 1, roll
     assert report["awaiting_respawn"] == [], report
 
     stack.wait_generation_bump("serve", {name: gen for name, (kind, gen) in before.items() if kind == "serve"})

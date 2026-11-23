@@ -41,7 +41,7 @@ async def _register_telegram_webhook() -> None:
     settings = telegram_settings()
     token = require_secret(settings.bot_token, "the telegram channel", "CHANNEL_TELEGRAM_BOT_TOKEN")
     secret = require_secret(settings.webhook_secret, "the telegram channel", "CHANNEL_TELEGRAM_WEBHOOK_SECRET")
-    base = require(settings.public_base_url, "the telegram channel", "CHANNEL_TELEGRAM_PUBLIC_BASE_URL")
+    base = require(tai42_app.http.public_base_url(), "the telegram channel", "TAI_PUBLIC_BASE_URL")
     # No default recipient AND an empty allowlist can never deliver — abort startup.
     if settings.default_recipient is None and not settings.allowed_recipients:
         raise ValueError(
@@ -50,7 +50,7 @@ async def _register_telegram_webhook() -> None:
         )
 
     payload = {
-        "url": f"{base.rstrip('/')}{_INBOUND_MOUNT_BASE}/inbound",
+        "url": f"{base}{_INBOUND_MOUNT_BASE}/inbound",
         "secret_token": secret,
         # Typed replies arrive as messages; inline-keyboard option taps (select /
         # suggested-reply asks, notify options) arrive as callback queries.

@@ -75,14 +75,14 @@ _TELEGRAM_NEEDS = (
     "topology:replicas",
     "helper:channel-fake:telegram",
     "setting:CHANNEL_TELEGRAM_DEFAULT_RECIPIENT",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 _SLACK_NEEDS = (
     "kind:channels:slack",
     "topology:replicas",
     "helper:channel-fake:slack",
     "setting:CHANNEL_SLACK_SIGNING_SECRET",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 
 

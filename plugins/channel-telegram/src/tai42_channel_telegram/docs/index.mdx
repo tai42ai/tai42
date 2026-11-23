@@ -22,24 +22,25 @@ inherited connection-tuning fields) point the plugin-owned correlation store.
 | --- | --- | --- |
 | `CHANNEL_TELEGRAM_BOT_TOKEN` | unset | Bot credential from BotFather; the auth for outbound sends. Secret. |
 | `CHANNEL_TELEGRAM_WEBHOOK_SECRET` | unset | Echoed by Telegram in `X-Telegram-Bot-Api-Secret-Token`; the inbound door compares it constant-time and fails closed when unset. Secret. |
-| `CHANNEL_TELEGRAM_PUBLIC_BASE_URL` | unset | This deployment's public origin; the startup hook builds the webhook URL from it. |
 | `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS` | empty | Whitelist of chats (numeric chat id or `@username`) a caller-supplied recipient may name. Comma-separated or JSON list. |
 | `CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` | unset | Chat delivered to when the caller names none; not allowlist-checked. |
 | `CHANNEL_TELEGRAM_HTTP_TIMEOUT_SECONDS` | `30` | Wall-clock budget for one outbound HTTP call. |
 | `CHANNEL_TELEGRAM_OPTION_TAP_TTL_SECONDS` | `86400` | How long a notification's tappable options stay resolvable, so a later tap still bridges the option's text. A select `ask` uses its own remaining answer time instead. |
+| `CHANNEL_TELEGRAM_DEDUPE_TTL` | `172800` | Seconds a refused media's notice stays remembered, so a redelivered update repeats no notice. |
 | `CHANNEL_TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Bot API origin. Overridable so a test stub can stand in; production leaves the default. |
 | `CHANNEL_TELEGRAM_REDIS_URL` | unset | Connection for the correlation store. |
 
-`CHANNEL_TELEGRAM_BOT_TOKEN`, `CHANNEL_TELEGRAM_WEBHOOK_SECRET` and
-`CHANNEL_TELEGRAM_PUBLIC_BASE_URL` are **required**, and so is at least one of
-`CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` and `CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS`: the
-startup hook refuses to boot without them, naming the missing variable.
+`CHANNEL_TELEGRAM_BOT_TOKEN` and `CHANNEL_TELEGRAM_WEBHOOK_SECRET` are **required**,
+and so is at least one of `CHANNEL_TELEGRAM_DEFAULT_RECIPIENT` and
+`CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS`. The deployment's own `TAI_PUBLIC_BASE_URL`
+(its public origin) is required too: the startup hook builds the webhook URL from it.
+The hook refuses to boot without any of them, naming the missing variable.
 
 ## Webhook registration is automatic
 
 Unlike the other channels, Telegram's webhook is registered **automatically**: on
 startup the plugin calls `setWebhook` (idempotent) to point Telegram at
-`{PUBLIC_BASE_URL}/api/channels/telegram/inbound` with the secret token. You do
+`{TAI_PUBLIC_BASE_URL}/api/channels/telegram/inbound` with the secret token. You do
 not configure it by hand. A failed `setWebhook` call, including an unreachable Bot
 API, aborts startup.
 
@@ -78,7 +79,8 @@ option tap time has passed) answers nothing and leaves any pending question as i
 tapped button's label bridges as the user's message, a reply to the message holding the
 keyboard, with no `params`. When Telegram's update carries no label for the tapped button
 (an old message Telegram reports as inaccessible carries no keyboard), the user gets one
-"could not be read" notice and a platform event records it as `unreadable`.
+"That choice is no longer available. Please type your reply as a message." notice and a
+platform event records it as `choice_unavailable`.
 
 Entry params are bounded at the door (at most 16 keys, each value at most 512 characters,
 the whole set at most 2048 bytes). Because Telegram redelivers a failed webhook, this door
@@ -115,7 +117,9 @@ event records why — `too_large` (over the operator's per-kind cap), `unsupport
 outage, or an unfetchable source). A caption on a rejected media is still bridged as a
 text-only turn, so the participant's words are never lost. A transient failure (a
 timeout, a 5xx, or a torn read) is not acked, so Telegram redelivers the update — the
-update id dedupes a redelivery that later succeeds.
+update id dedupes a redelivery that later succeeds, and a redelivered update whose media
+was already refused sends no second notice (the refusal is remembered for
+`CHANNEL_TELEGRAM_DEDUPE_TTL` seconds).
 
 Content a user can send or forward that this channel does not map to a media kind — a
 **poll**, **dice**, **venue**, **contact**, **location**, **game**, **story**, **paid

@@ -4,8 +4,9 @@ Covers ``run_tool`` / ``reload_tool`` / ``remove_tool``. ``run_tool`` takes a
 ``tool_name`` argument (the route's request-model shape) and shares the
 ``/api/run-tool`` route's typed error surface — an unknown tool is a
 :class:`NotFoundError` (404), a typed error from the dispatch seam (a
-:class:`PermissionDeniedError` 403) passes through untouched, and any other raise DURING
-execution is an :class:`OperationFailedError` (500). ``reload_tool`` / ``remove_tool`` apply
+:class:`PermissionDeniedError` 403) passes through untouched, a projected operation's
+``ToolError`` raised from a typed error answers that typed error (the leaving 503 included),
+and any other raise DURING execution is an :class:`OperationFailedError` (500). ``reload_tool`` / ``remove_tool`` apply
 locally when this worker is a target, then broadcast on the bus; the response is the per-origin
 fleet report. Projection: ``run_tool`` is tier-1 hardcode-blocked; ``reload_tool`` /
 ``remove_tool`` project with ``destructiveHint``.
@@ -19,13 +20,16 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastmcp.exceptions import ToolError
 from tai42_contract.app import tai42_app
+from tai42_contract.errors import OperationError
 from tai42_contract.interactions import RunResultAnswer
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_contract.secrets import SecretValue
 
 from tai42_skeleton.app import instance
 from tai42_skeleton.app.bus import LocalApplyResult, OpOutcome
+from tai42_skeleton.app.writer_exit import WorkerLeavingError
 from tai42_skeleton.operations import (
     BadRequestError,
     NotFoundError,
@@ -370,6 +374,53 @@ async def test_run_tool_passes_a_501_from_the_tool_through_unchanged(monkeypatch
     assert caught.value is refusal
     assert caught.value.status == 501
     _assert_nothing_logged_server_side(caplog)
+
+
+def _projected_refusal(refusal: OperationError) -> ToolError:
+    """The ``ToolError`` a projected operation raises for its typed ``refusal``, chained to it."""
+    try:
+        raise ToolError(refusal.message) from refusal
+    except ToolError as wrapped:
+        return wrapped
+
+
+async def test_run_tool_answers_a_projected_leaving_refusal_as_the_leaving_503(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    # An executed tool that is a projected operation refused on a leaving worker raises the
+    # projection's ``ToolError`` chained to the ``WorkerLeavingError``: the door answers that typed
+    # refusal itself — its 503 and its ``leaving`` key — and records no server failure.
+    refusal = WorkerLeavingError("the writer's own restart", "Apply a profile")
+    _install(monkeypatch, tools=_Tools({"apply_profile"}, run_exc=_projected_refusal(refusal)))
+    with caplog.at_level(logging.DEBUG, logger=tools_ops.logger.name), pytest.raises(WorkerLeavingError) as caught:
+        await tools_ops.run_tool("apply_profile", {})
+    assert caught.value is refusal
+    assert caught.value.status == 503
+    assert caught.value.extra == {"leaving": "the writer's own restart"}
+    _assert_nothing_logged_server_side(caplog)
+
+
+async def test_run_tool_answers_a_projected_not_found_refusal_as_its_404(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    refusal = NotFoundError("preset not found: alpha")
+    _install(monkeypatch, tools=_Tools({"get_preset"}, run_exc=_projected_refusal(refusal)))
+    with caplog.at_level(logging.DEBUG, logger=tools_ops.logger.name), pytest.raises(NotFoundError) as caught:
+        await tools_ops.run_tool("get_preset", {"name": "alpha"})
+    assert caught.value is refusal
+    _assert_nothing_logged_server_side(caplog)
+
+
+async def test_run_tool_answers_a_tool_error_with_no_typed_cause_as_a_500(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    # A ``ToolError`` that crossed no projection (a tool's own text failure) stays a raise during
+    # execution: the structured 500 carrying its text, recorded server-side.
+    _install(monkeypatch, tools=_Tools({"calc"}, run_exc=ToolError("division by zero")))
+    with caplog.at_level(logging.ERROR, logger=tools_ops.logger.name), pytest.raises(OperationFailedError) as caught:
+        await tools_ops.run_tool("calc", {})
+    assert caught.value.message == "division by zero"
+    _assert_logged_server_side(caplog, "division by zero")
 
 
 async def test_run_tool_failed_terminal_delivers_the_outcome_whole_as_data(

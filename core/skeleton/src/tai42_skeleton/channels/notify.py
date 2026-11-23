@@ -65,6 +65,7 @@ from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.settings import interactions_settings
 from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.settings.public_base_url import PUBLIC_BASE_URL_SETTING, public_base_url_settings
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,7 @@ async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaI
     input, a ``ValueError`` the door maps to a 400). Then: a ``data:`` image is stored by
     reference and its url swapped for an ABSOLUTE served reference, and an ALREADY-STORED
     same-origin route reference (``{MEDIA_ROUTE_PREFIX}{id}``, ANY media kind) is made
-    absolute against the public base url — both because a channel vendor fetches media
+    absolute against ``TAI_PUBLIC_BASE_URL`` — both because a channel vendor fetches media
     from its OWN servers, so a relative same-origin url is unfetchable off-origin. A
     ``data:`` image with no public base is a loud ``ChannelInputError`` naming the setting
     (the door maps it to a 400), never a silent drop. Redis is touched only when a rewrite
@@ -170,19 +171,16 @@ async def _prepare_channel_media(media: list[Any], settings: Any) -> list[MediaI
     """
     items = [item if isinstance(item, MediaItem) else MediaItem.model_validate(item) for item in media]
     has_data_image = any(item.kind is MediaKind.IMAGE and item.url.startswith("data:image/") for item in items)
-    if has_data_image and settings.public_base_url is None:
-        raise ChannelInputError(
-            "a data: image on a channel notification requires INTERACTIONS_PUBLIC_BASE_URL to be set"
-        )
+    base_url = public_base_url_settings().base_url
+    if has_data_image and base_url is None:
+        raise ChannelInputError(f"a data: image on a channel notification requires {PUBLIC_BASE_URL_SETTING} to be set")
     has_route_ref = any(item.url.startswith(MEDIA_ROUTE_PREFIX) for item in items)
     # With no data: image AND no absolutizable route reference (either no route ref, or no
     # public base url to absolutize it with) nothing touches the store.
-    if has_data_image or (has_route_ref and settings.public_base_url is not None):
+    if has_data_image or (has_route_ref and base_url is not None):
         store = InteractionStore(settings.key_prefix)
         async with client_ctx(RedisClient, settings.redis) as r:
-            items = await substitute_media(
-                store, r, items, settings.idle_ttl_seconds, base_url=settings.public_base_url
-            )
+            items = await substitute_media(store, r, items, settings.idle_ttl_seconds, base_url=base_url)
     return items
 
 
@@ -410,7 +408,7 @@ async def notify_user(
     channel
     send fails; ``ChannelInputError`` when a channel permanently refuses the input's shape
     (an input it cannot render by nature — retrying cannot succeed) or a ``data:`` image is
-    given for a channel send with no ``INTERACTIONS_PUBLIC_BASE_URL`` to mint its absolute
+    given for a channel send with no ``TAI_PUBLIC_BASE_URL`` to mint its absolute
     url. Every failure propagates loudly — nothing is swallowed.
     """
     # Type check only: whether a BLANK message is admissible is the contract's blank-vs-media

@@ -2,7 +2,7 @@
 
 The tap answers nothing, so it never touches an ask: the channel reads the tapped button's label off
 the keyboard Telegram echoes with the tap and bridges it as a message from the user, a reply to the
-keyboard's message. The user reads the route's reply to that message, never the unreadable notice.
+keyboard's message. The user reads the route's reply to that message, never the choice-unavailable notice.
 
 Driven over the live media-bridge stack; the channel mocks over its in-process stub, so any real
 selection breaks the stub and the module steps aside.
@@ -72,5 +72,5 @@ async def test_a_tap_no_live_question_holds_is_bridged_as_the_users_message_with
     finally:
         await media_bridge.api().delete(f"/api/conversations/{route_name}", expect=200)
 
-    unreadable = notices_to(media_bridge.fake_telegram, REJECTION_NOTICES["unreadable"], chat_id, "chat_id")
-    assert unreadable == [], f"a bridged stale tap must not send the unreadable notice: {unreadable!r}"
+    unavailable = notices_to(media_bridge.fake_telegram, REJECTION_NOTICES["choice_unavailable"], chat_id, "chat_id")
+    assert unavailable == [], f"a bridged stale tap must not send the choice-unavailable notice: {unavailable!r}"

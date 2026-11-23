@@ -118,9 +118,10 @@ class ReplyTexts(BaseModel):
     with no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being
     erased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``
     when ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /
-    ``rejected_could_not_receive`` / ``rejected_unreadable`` are the notices for an inbound message the
-    channel cannot bridge, a file over the cap, a file the channel could not fetch, and an inbound
-    message whose body the channel could not read. Every member but
+    ``rejected_could_not_receive`` / ``rejected_unreadable`` / ``rejected_choice_unavailable`` are the
+    notices for an inbound message the channel cannot bridge, a file over the cap, a file the channel
+    could not fetch, an inbound message whose body the channel could not read, and a tap on a choice
+    the channel can no longer read. Every member but
     ``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a
     :data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in
     English reply is sent. An empty catalogue names nothing and is refused; an unknown key is
@@ -142,6 +143,7 @@ class ReplyTexts(BaseModel):
     rejected_too_large: ReplyText | None = None
     rejected_could_not_receive: ReplyText | None = None
     rejected_unreadable: ReplyText | None = None
+    rejected_choice_unavailable: ReplyText | None = None
 
     @field_validator("pairing_code")
     @classmethod

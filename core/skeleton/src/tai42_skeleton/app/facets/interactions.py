@@ -135,9 +135,9 @@ class InteractionsFacet(_Facet):
 
     def callback_url_prefix(self) -> str | None:
         """The absolute prefix every callback URL this platform mints starts with; ``None`` with no public base."""
-        from tai42_skeleton.interactions.settings import callback_url_prefix, interactions_settings
+        from tai42_skeleton.interactions.settings import callback_url_prefix
 
-        return callback_url_prefix(interactions_settings())
+        return callback_url_prefix()
 
     @property
     def visit(self) -> Visit:

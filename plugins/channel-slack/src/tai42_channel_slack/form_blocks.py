@@ -18,7 +18,7 @@ from typing import Any, assert_never
 
 from tai42_contract.channels import ChannelInputError
 from tai42_contract.interactions import FormControl, FormInputMode
-from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawn_number_bounds
+from tai42_kit.interactions import RADIO_OPTION_THRESHOLD, drawn_number_bounds, find_option
 
 # One fixed action_id per input block: block_id is the field name, so the pair
 # ``state.values[<field name>][FIELD_ACTION_ID]`` reads a field's value directly, and
@@ -205,11 +205,6 @@ def _radio_buttons(name: str, words: tuple[str, str]) -> dict[str, Any]:
     return {"type": "radio_buttons", "action_id": FIELD_ACTION_ID, "options": options}
 
 
-def _find_option(options: list[dict[str, Any]], value: str) -> dict[str, Any] | None:
-    """The option whose ``value`` matches, or ``None``."""
-    return next((option for option in options if option["value"] == value), None)
-
-
 def _slack_date(name: str, value: Any) -> str:
     """A "YYYY-MM-DD" string Slack's ``initial_date``/``selected_date`` accepts.
 
@@ -249,11 +244,11 @@ def _apply_single_initial(name: str, element: dict[str, Any], value: Any) -> Non
     # Prefill a static_select / radio_buttons: a bool picks the Yes/No option, any other value
     # the option whose value matches (a value not among the options is a caller bug, refused).
     if isinstance(value, bool):
-        match = _find_option(element["options"], "true" if value else "false")
+        match = find_option(element["options"], "true" if value else "false")
         if match is not None:
             element["initial_option"] = match
         return
-    match = _find_option(element["options"], str(value))
+    match = find_option(element["options"], value)
     if match is None:
         raise FormSchemaError(f"form field {name!r} prefilled value {value!r} is not among its options")
     element["initial_option"] = match
@@ -268,7 +263,7 @@ def _apply_multi_initial(name: str, element: dict[str, Any], value: Any) -> None
         )
     matches: list[dict[str, Any]] = []
     for item in value:
-        match = _find_option(element["options"], str(item))
+        match = find_option(element["options"], item)
         if match is None:
             raise FormSchemaError(f"form field {name!r} prefilled value {item!r} is not among its options")
         matches.append(match)

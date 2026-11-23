@@ -27,7 +27,7 @@ from starlette.requests import Request
 from tai42_contract.access_control import KEY_FINGERPRINT_CLAIM
 from tai42_contract.app import tai42_app
 from tai42_contract.hooks import HookParams
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
 from tai42_skeleton.app import instance
@@ -35,7 +35,6 @@ from tai42_skeleton.authz import execution as execution_module
 from tai42_skeleton.backup.registry import BackupRegistry, _empty_report
 from tai42_skeleton.backup.sections import register_core_sections
 from tai42_skeleton.routers.backup import export_backup, import_backup, list_sections
-from tai42_skeleton.template import TemplateNotFoundError
 
 from .._fakes.bus import FakeBus
 from .._fakes.mcp_listing import no_mcp_listing

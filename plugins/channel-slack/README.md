@@ -97,11 +97,11 @@ All links: https://docs.slack.dev
    DM target); copy the bot token into `CHANNEL_SLACK_BOT_TOKEN`.
 2. Copy the app's signing secret into `CHANNEL_SLACK_SIGNING_SECRET`.
 3. Event Subscriptions → enable, Request URL =
-   `{INTERACTIONS_PUBLIC_BASE_URL}/api/channels/slack/inbound` (the app must
+   `{TAI_PUBLIC_BASE_URL}/api/channels/slack/inbound` (the app must
    already be running so the signed `url_verification` handshake succeeds),
    and subscribe to bot events `message.channels` (and/or `message.im`).
 4. Interactivity & Shortcuts → enable, Request URL =
-   `{INTERACTIONS_PUBLIC_BASE_URL}/api/channels/slack/interactive` — required
+   `{TAI_PUBLIC_BASE_URL}/api/channels/slack/interactive` — required
    for `form` questions, whose modal is opened and submitted through this door
    (same signing secret, verified the same way).
 5. Invite the bot to every target channel; put the fallback channel id in
@@ -149,7 +149,8 @@ All links: https://docs.slack.dev
    `{"answer": "<typed text>"}` to the stored callback URL. A thread reply that
    matches no pending question bridges into the conversation instead. A message
    whose text is blank is not bridged and gets the one `unreadable` notice; a blank
-   reply to a pending question leaves it open.
+   reply to a pending question leaves it open. A message shared with no comment
+   (blank text carrying attachments) gets the one `unsupported_type` notice instead.
 6. The public callback door validates the answer against the question's stored
    format and records it; the blocked `ask` returns it.
 
@@ -238,12 +239,16 @@ never submitted.
 **Reacting forms.** When a form's ask names a reaction handler and declares
 `reactions` triggers, a reacting field dispatches a `block_actions` on change; the
 door runs the handler through the platform's one reaction seam and applies the
-returned update by `views.update` — setting values, replacing a field's choice list,
+returned update by `views.update` — setting or clearing values, replacing a field's choice list,
 showing a per-field error (as a context line), and filling a display slot (a
 computed total shows as a `section`). The accumulated reaction state rides the view's
 `private_metadata`, so it survives each re-render. The `submitted` trigger runs the
 handler on `view_submission` as the consumer's final check: its per-field errors keep
-the modal open as inline errors; a clean check lets the answer through. A handler
+the modal open as inline errors; a clean check lets the answer through. A clean check
+that replaces a choice list drops a pick the new list no longer offers, then lays its
+own values on; that answer is checked again, and a broken shape keeps the modal open,
+redrawn with the new list and the field's sentence (the caller's
+`wording.form.fields.<field>.required` or `invalid` when set). A handler
 failure surfaces loudly — a notice to the person plus a logged error — never a stale
 or silent value. The notice reads `wording.form.update_failed` when set (its optional
 `{reason}` token takes the reason a reaction raised as `FormReactionError`, empty for any

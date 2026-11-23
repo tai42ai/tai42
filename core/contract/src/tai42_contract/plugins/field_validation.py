@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from tai42_contract._urls import is_control_char
+from tai42_contract.urls import is_control_char
 
 # Lowercase slug for the publisher namespace, the listing name, and categories:
 # a letter, then lowercase alphanumerics/hyphens.

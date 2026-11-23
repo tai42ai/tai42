@@ -46,7 +46,7 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations.interactions import _add_data
 from tai42_skeleton.routers import interactions as router
 
-from .._helpers import DeliverOnlyChannel, await_add_event
+from .._helpers import DeliverOnlyChannel, await_add_event, set_public_base_url
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +99,8 @@ class RecordingHooks:
 
 @pytest.fixture
 def wired(monkeypatch, fake_redis, fake_client_ctx):
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(router, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(router, "interactions_settings", lambda: settings)
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
@@ -267,10 +268,9 @@ async def test_data_media_channel_ask_requires_public_base_url(monkeypatch, wire
     # With no public base url, a channel ask carrying a data: image must fail loudly at ask
     # time (the setting named), never emit a relative served ref onto a channel delivery —
     # mirroring the notify path's data:-image refusal.
-    settings = wired.settings.model_copy(update={"public_base_url": None})
-    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    set_public_base_url(monkeypatch, None)
     media: list[MediaItem | dict[str, Any]] = [{"kind": "image", "url": _DATA_PNG}]
-    with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+    with pytest.raises(RuntimeError, match="TAI_PUBLIC_BASE_URL"):
         await ask("See this?", channel="fake", media=media, timeout=5)
     # No delivery ever ran and nothing was persisted (the raise is before any store).
     assert fake_channel.deliveries == []
@@ -698,10 +698,11 @@ async def test_channel_text_delivery_carries_suggested_reply_options(wired, fake
 
 
 async def test_channel_requires_public_base_url(monkeypatch, fake_redis, fake_client_ctx, fake_channel):
-    settings = InteractionsSettings(public_base_url=None)
+    set_public_base_url(monkeypatch, None)
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
-    with pytest.raises(RuntimeError, match="INTERACTIONS_PUBLIC_BASE_URL"):
+    with pytest.raises(RuntimeError, match="TAI_PUBLIC_BASE_URL"):
         await ask("q", channel="fake", timeout=5)
 
 

@@ -12,7 +12,7 @@ from tai42_contract.channels import ChannelInputError
 
 from tai42_channel_whatsapp.flows import FORM_ENTRY_SCREEN, _canonical_hash_pages, build_form_flow, form_needs_endpoint
 from tai42_channel_whatsapp.flows_components import component_names, payload_labels
-from tai42_channel_whatsapp.flows_send_data import build_flow_data
+from tai42_channel_whatsapp.flows_send_data import build_flow_data, field_init_value
 from tai42_channel_whatsapp.flows_visibility import form_ref
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -506,6 +506,22 @@ def test_absent_date_prefill_defaults_to_empty_string():
 
     data = build_flow_data(schema, {}, {})
     assert data["when__init"] == ""
+
+
+@pytest.mark.parametrize(
+    ("prop", "empty"),
+    [
+        ({"type": "string"}, ""),
+        ({"type": "string", "format": "date"}, ""),
+        ({"type": "integer"}, ""),
+        ({"type": "string", "enum": ["a", "b"]}, ""),
+        ({"type": "string", "enum": ["a", "b"], "control": "chips"}, []),
+        ({"type": "array", "items": {"type": "string", "enum": ["a", "b"]}}, []),
+        ({"type": "boolean"}, False),
+    ],
+)
+def test_a_none_value_reads_as_unfilled_and_takes_the_controls_empty_default(prop: dict, empty: object):
+    assert field_init_value("f", prop, {"f": None}) == empty
 
 
 @pytest.mark.parametrize(

@@ -185,7 +185,7 @@ async def ask(
     combination or a blank ``audience``, ``CrossIdentityAudienceError`` when a
     RESTRICTED caller addresses another identity (a loud cross-identity authorization
     denial), and ``RuntimeError`` when an external question is asked without
-    ``INTERACTIONS_PUBLIC_BASE_URL``. Invalid ``media`` raises
+    ``TAI_PUBLIC_BASE_URL``. Invalid ``media`` raises
     ``pydantic.ValidationError`` when the ``InteractionRequest`` is built, before
     any state is written.
 

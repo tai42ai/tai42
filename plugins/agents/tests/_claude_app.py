@@ -22,7 +22,7 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.monitoring.models import SpanKind
 from tai42_contract.sandbox import Sandbox, SandboxPolicy
 from tai42_contract.storage import directory_prefix
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError, TemplateNotTextError
 from tai42_kit.monitoring.otel import OtelWriter
 
 from ._client_tool import FakeClientTool, client_tool
@@ -201,13 +201,15 @@ class _ResourceManager:
         return [key for key in self.templates if key.startswith(prefix)]
 
     async def fetch_template(self, key: str) -> str:
+        if key not in self.templates:
+            raise TemplateNotFoundError(f"Template {key!r} not found.")
         stored = self.templates[key]
         if isinstance(stored, str):
             return stored
         try:
             return stored.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError(f"Template {key!r} is not a text template") from exc
+            raise TemplateNotTextError(f"Template {key!r} is not a text template") from exc
 
     async def load(self, source: str, *, with_mime: bool = True) -> tuple[bytes, str | None]:
         stored = self.templates[source]

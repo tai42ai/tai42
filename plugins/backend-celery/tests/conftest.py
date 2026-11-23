@@ -23,7 +23,7 @@ import pytest
 from tai42_contract.access_control import caller_may_read_secrets
 from tai42_contract.app import tai42_app
 from tai42_contract.interactions import VisitOutcome
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.compute import stop_compute_pool
 from tai42_kit.utils.detached_util import in_detached_run
 from tai42_kit.utils.run_bound import run_bound
@@ -172,7 +172,7 @@ class _StubResourceManager:
         if text.id is None:
             raise ValueError("a templated text sets exactly one of 'content' or 'id'; neither was supplied")
         if text.id not in self.templates:
-            raise KeyError(f"no stored resource for template id {text.id!r}")
+            raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
         return self.templates[text.id]
 
 

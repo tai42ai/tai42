@@ -8340,6 +8340,22 @@
         "title": "LastOp",
         "type": "object"
       },
+      "LeavingError": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "leaving": {
+            "description": "Why the worker is leaving; the caller retries on a worker that is not leaving.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "leaving"
+        ],
+        "type": "object"
+      },
       "LineWording": {
         "additionalProperties": false,
         "description": "The caller's words for the lines of a delivery message, for ONE send. Frozen, strict keys.\n\n``answer_link`` is the sentence carrying the tappable answer link and MUST contain the ``{url}``\ntoken (the channel fills it by a plain substitution); ``deadline`` names the deadline and MUST\ncontain ``{deadline}`` (the channel fills it with its own formatted instant); ``reply`` tells\nthe end user how to reply and carries no token; ``options`` lists the choices and MUST contain\n``{options}`` (the channel fills it with its own joined list). Each is the sender's own words,\nin the end-user's language; absent, the surface shows its own generic word. A set value is\nnon-blank; an empty object names nothing and is refused; an unknown key is refused.",
@@ -9271,7 +9287,7 @@
       },
       "MediaItem": {
         "additionalProperties": false,
-        "description": "One media item shown WITH a message — a display element, and inbound a participant's sent media.\n\n``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as\nthe matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file\nkind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a\nsame-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an\nabsolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a\nchannel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP\n``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``\nremote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline\n``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file\nkind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by\n``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS\nname, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded\n``user@`` credential form is rejected as it spoofs the authority — and is always a single\nline — raw whitespace and control/format characters are rejected. ``caption`` is the\naccessibility text — the image's alt text, a file's label, or the link's display label.\n``filename`` is the document's suggested display name; it is meaningful ONLY for a\n``document`` item and is refused on every other kind.",
+        "description": "One media item shown WITH a message — a display element, and inbound a participant's sent media.\n\n``kind`` selects how it renders: an ``image`` inline, a ``document``/``video``/``audio`` as\nthe matching file bubble, a ``link`` as a labelled anchor. ``url`` is the source. A file\nkind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a\nsame-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an\nabsolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a\nchannel send mints from ``TAI_PUBLIC_BASE_URL`` (remote file media is https-only: the inbox CSP\n``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``\nremote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline\n``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file\nkind is refused. A ``link`` must be an absolute ``http(s)`` URL (anchors are not governed by\n``img-src``; the human clicks through). A remote url names a host directly — an ASCII DNS\nname, dotted-quad IPv4, or bracketed IPv6 (IDN callers supply punycode); an embedded\n``user@`` credential form is rejected as it spoofs the authority — and is always a single\nline — raw whitespace and control/format characters are rejected. ``caption`` is the\naccessibility text — the image's alt text, a file's label, or the link's display label.\n``filename`` is the document's suggested display name; it is meaningful ONLY for a\n``document`` item and is refused on every other kind.",
         "properties": {
           "caption": {
             "anyOf": [
@@ -14169,7 +14185,7 @@
       },
       "ReplyTexts": {
         "additionalProperties": false,
-        "description": "The caller's words for the platform's fixed participant replies on one route. Frozen, strict keys.\n\n``error`` is sent when a turn fails and the target gave no reply; ``slow_down`` when an address\nis over the turn cap; ``pairing_linked`` when a pair code was redeemed and the two persons\nmerged; ``pairing_unlinked`` when ``/unlink`` detached the address; ``pairing_not_linked`` when\n``/unlink`` came from an address linked to nothing; ``pairing_code_invalid`` when a redeem was\nrefused; ``pairing_code`` is the ``/link`` reply carrying the fresh code, a template that MUST\nreference ``{pairing_code}`` and may reference ``{expires_at}`` (the code's ISO-8601 expiry),\nwith no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being\nerased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``\nwhen ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /\n``rejected_could_not_receive`` / ``rejected_unreadable`` are the notices for an inbound message the\nchannel cannot bridge, a file over the cap, a file the channel could not fetch, and an inbound\nmessage whose body the channel could not read. Every member but\n``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a\n:data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in\nEnglish reply is sent. An empty catalogue names nothing and is refused; an unknown key is\nrefused.",
+        "description": "The caller's words for the platform's fixed participant replies on one route. Frozen, strict keys.\n\n``error`` is sent when a turn fails and the target gave no reply; ``slow_down`` when an address\nis over the turn cap; ``pairing_linked`` when a pair code was redeemed and the two persons\nmerged; ``pairing_unlinked`` when ``/unlink`` detached the address; ``pairing_not_linked`` when\n``/unlink`` came from an address linked to nothing; ``pairing_code_invalid`` when a redeem was\nrefused; ``pairing_code`` is the ``/link`` reply carrying the fresh code, a template that MUST\nreference ``{pairing_code}`` and may reference ``{expires_at}`` (the code's ISO-8601 expiry),\nwith no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being\nerased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``\nwhen ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /\n``rejected_could_not_receive`` / ``rejected_unreadable`` / ``rejected_choice_unavailable`` are the\nnotices for an inbound message the channel cannot bridge, a file over the cap, a file the channel\ncould not fetch, an inbound message whose body the channel could not read, and a tap on a choice\nthe channel can no longer read. Every member but\n``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a\n:data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in\nEnglish reply is sent. An empty catalogue names nothing and is refused; an unknown key is\nrefused.",
         "properties": {
           "error": {
             "anyOf": [
@@ -14290,6 +14306,21 @@
             ],
             "default": null,
             "title": "Pairing Unlinked"
+          },
+          "rejected_choice_unavailable": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rejected Choice Unavailable"
           },
           "rejected_could_not_receive": {
             "anyOf": [
@@ -22220,13 +22251,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -22321,13 +22352,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -22659,13 +22690,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -25471,13 +25502,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -25821,16 +25852,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -26274,16 +26308,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -26686,13 +26723,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -26921,11 +26958,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeavingError"
                 }
               }
             },
-            "description": "The server cannot serve this request right now; retry shortly."
+            "description": "This worker is leaving and begins no change; retry shortly."
           }
         },
         "security": [
@@ -26997,11 +27034,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeavingError"
                 }
               }
             },
-            "description": "The server cannot serve this request right now; retry shortly."
+            "description": "This worker is leaving and begins no change; retry shortly."
           }
         },
         "security": [
@@ -27262,11 +27299,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeavingError"
                 }
               }
             },
-            "description": "The server cannot serve this request right now; retry shortly."
+            "description": "This worker is leaving and begins no change; retry shortly."
           }
         },
         "security": [
@@ -27348,11 +27385,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeavingError"
                 }
               }
             },
-            "description": "The server cannot serve this request right now; retry shortly."
+            "description": "This worker is leaving and begins no change; retry shortly."
           }
         },
         "security": [
@@ -27491,13 +27528,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -27687,13 +27724,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -29022,16 +29059,16 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/ReloadingError"
+                      "$ref": "#/components/schemas/Error"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/ReloadingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -29170,16 +29207,16 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/ReloadingError"
+                      "$ref": "#/components/schemas/Error"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/ReloadingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -30410,11 +30447,11 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/LeavingError"
                 }
               }
             },
-            "description": "The server cannot serve this request right now; retry shortly."
+            "description": "This worker is leaving and begins no change; retry shortly."
           }
         },
         "security": [
@@ -31883,7 +31920,7 @@
     },
     "/api/interactions/stream": {
       "get": {
-        "description": "Serve the interactions inbox live tail as an SSE ``StreamingResponse``.\n\nRefuses with a plain 501 when the store is unconfigured; otherwise resumes from the\ncaller's ``Last-Event-ID`` (or the current tail end) and streams the live tail.",
+        "description": "Serve the interactions inbox live tail as an SSE ``StreamingResponse``.\n\nRefuses with a plain 501 when the store is unconfigured, with 400 for a malformed\n``Last-Event-ID`` and with 410 for one no longer in the retained stream; otherwise\nresumes after the caller's ``Last-Event-ID`` (or opens at the current tail end) and\nstreams the live tail.",
         "operationId": "get_api_interactions_stream",
         "responses": {
           "200": {
@@ -31897,6 +31934,16 @@
             "description": "Interactions inbox live tail: SSE StreamingResponse",
             "x-no-body": "Interactions inbox live tail: SSE StreamingResponse"
           },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Malformed request."
+          },
           "401": {
             "content": {
               "application/json": {
@@ -31906,6 +31953,16 @@
               }
             },
             "description": "Missing or invalid api key."
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Resource no longer available."
           },
           "501": {
             "content": {
@@ -32560,16 +32617,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -32811,16 +32871,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33400,16 +33463,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33541,16 +33607,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33632,16 +33701,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33743,16 +33815,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33854,16 +33929,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -33958,13 +34036,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -34086,16 +34164,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -34242,16 +34323,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -36259,7 +36343,7 @@
     },
     "/api/presets/{name}": {
       "delete": {
-        "description": "Delete a preset.\n\nOrder: existence → refuse with a 409 listing every holder of the preset or one of its\nextension branch tools → every delete cascade for each of those names → removal → the\noverlay rows of those names cleared. A non-conflicted record is soft-deleted and its base + branch\ntools torn down (one ``list_changed``); a conflicted record is removed store-side ONLY (HARD delete +\ndrop the quarantine entry), touching no registration and firing no emit. Both branches fan the\nremoval out on the bus and embed the per-worker fleet report under ``fanout``.",
+        "description": "Delete a preset.\n\nOrder: existence → refuse with a 409 listing every holder of the preset or one of its\nextension branch tools → every delete cascade for each of those names → removal → the\noverlay rows of those names cleared. A cascade that raises fails the delete before anything is\nremoved: its typed operation error as it is, any other raise as a ``500`` naming the cascade's\nreason; the cascades already run are not undone. A non-conflicted record is soft-deleted and its base + branch\ntools torn down (one ``list_changed``); a conflicted record is removed store-side ONLY (HARD delete +\ndrop the quarantine entry), touching no registration and firing no emit. Both branches fan the\nremoval out on the bus and embed the per-worker fleet report under ``fanout``.",
         "operationId": "delete_api_presets_name",
         "parameters": [
           {
@@ -36319,6 +36403,16 @@
               }
             },
             "description": "Conflict with the current resource state."
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Internal server error."
           },
           "503": {
             "content": {
@@ -37146,7 +37240,7 @@
     },
     "/api/render-template": {
       "post": {
-        "description": "Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with its ``kwargs``.\n\n``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a\ncaller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that\ncannot be fetched is a ``404`` naming that id; broken client-supplied Jinja (a syntax\nerror, a sandbox-blocked dunder traversal → ``SecurityError``, an undefined access)\nis author error → ``400``, as is a stored ``id`` naming an object that is not UTF-8\ntext. Genuine storage failures raise other types (``500``).",
+        "description": "Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with its ``kwargs``.\n\n``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a\ncaller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id``, or an id\nthe body includes, that names no stored template is a ``404`` naming it; any other text\nthat cannot be rendered as authored (a body that does not parse or render — a syntax\nerror, a construct the sandbox refuses, an undefined access — or a stored object that is\nnot UTF-8 text) is author error → ``400``. Genuine storage failures raise other types\n(``500``).",
         "operationId": "post_api_render_template",
         "requestBody": {
           "content": {
@@ -37509,16 +37603,19 @@
                 "schema": {
                   "anyOf": [
                     {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -38003,16 +38100,16 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/ReloadingError"
+                      "$ref": "#/components/schemas/Error"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/ReloadingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -38159,16 +38256,16 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/ReloadingError"
+                      "$ref": "#/components/schemas/Error"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/ReloadingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -43263,16 +43360,16 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "$ref": "#/components/schemas/ReloadingError"
+                      "$ref": "#/components/schemas/Error"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/ReloadingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server cannot serve this request right now, or the server is applying a config reload; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -43477,13 +43574,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -43578,13 +43675,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -43990,13 +44087,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",
@@ -44111,13 +44208,13 @@
                       "$ref": "#/components/schemas/ReloadingError"
                     },
                     {
-                      "$ref": "#/components/schemas/Error"
+                      "$ref": "#/components/schemas/LeavingError"
                     }
                   ]
                 }
               }
             },
-            "description": "The server is applying a config reload, or cannot serve this request right now; retry shortly.",
+            "description": "The server is applying a config reload, or this worker is leaving and begins no change; retry shortly.",
             "headers": {
               "Retry-After": {
                 "description": "Seconds to wait before retrying; carried by the reloading answer.",

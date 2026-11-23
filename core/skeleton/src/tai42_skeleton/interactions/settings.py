@@ -7,15 +7,15 @@ read from the ``INTERACTIONS_REDIS_*`` env; feature values from ``INTERACTIONS_*
 """
 
 from typing import ClassVar
-from urllib.parse import urlparse
 
 from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import SettingsConfigDict
 from tai42_contract.access_control.identity import ReadinessTarget
-from tai42_contract.interactions.models import LOCAL_HTTP_HOSTS
 from tai42_kit.clients import RedisConnectionSettings
 from tai42_kit.clients.impl.redis import RedisClient
 from tai42_kit.settings import TaiBaseSettings, settings_cache
+
+from tai42_skeleton.settings.public_base_url import public_base_url_settings
 
 
 class InteractionsRedisSettings(RedisConnectionSettings):
@@ -65,13 +65,6 @@ class InteractionsSettings(TaiBaseSettings):
     # and every durable record of the reaper keeps the same horizon. Must be
     # positive — a non-positive TTL would delete keys on write.
     idle_ttl_seconds: int = Field(default=86400, gt=0)
-
-    # Public base URL of the host serving the interactions routes; required for
-    # external-format questions (the callback URL is built from it). Must be
-    # https:// — the callback URL is a bearer capability and the POST door carries
-    # sensitive data. http:// is rejected loudly at settings load unless the host
-    # is a loopback host (``LOCAL_HTTP_HOSTS``) for local development.
-    public_base_url: str | None = None
 
     # Hard cap (bytes) on any request body the interactions doors read into
     # memory — the callback doors (body + query string) and the /answer door.
@@ -148,25 +141,6 @@ class InteractionsSettings(TaiBaseSettings):
             raise ValueError(f"INTERACTIONS_{(info.field_name or '').upper()} must not be blank")
         return value
 
-    @field_validator("public_base_url")
-    @classmethod
-    def _require_tls(cls, value: str | None) -> str | None:
-        """Reject a non-TLS public base URL unless it points at a loopback host.
-
-        (``LOCAL_HTTP_HOSTS``, local dev) — loud at settings load, before any callback URL is ever minted
-        from it.
-        """
-        if value is None:
-            return None
-        parsed = urlparse(value)
-        if parsed.scheme == "https":
-            return value
-        if parsed.scheme == "http" and parsed.hostname in LOCAL_HTTP_HOSTS:
-            return value
-        raise ValueError(
-            f"INTERACTIONS_PUBLIC_BASE_URL must be https:// (or http:// for a loopback host), got {value!r}"
-        )
-
 
 @settings_cache
 def interactions_settings() -> InteractionsSettings:
@@ -183,15 +157,16 @@ INTERACTIONS_NOT_CONFIGURED_MESSAGE = (
 )
 
 
-def callback_url_prefix(settings: InteractionsSettings) -> str | None:
-    """The absolute prefix every minted callback URL starts with, or ``None`` with no public base.
+def callback_url_prefix() -> str | None:
+    """The absolute prefix every minted callback URL starts with; ``None`` while ``TAI_PUBLIC_BASE_URL`` is unset.
 
     The one owner of the callback URL's shape: the mint appends the ticket to it, and every
     component that POSTs to a stored callback URL pins it against it.
     """
-    if settings.public_base_url is None:
+    base = public_base_url_settings().base_url
+    if base is None:
         return None
-    return f"{settings.public_base_url.rstrip('/')}/api/interactions/callback/"
+    return f"{base}/api/interactions/callback/"
 
 
 def interactions_store_configured() -> bool:

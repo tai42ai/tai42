@@ -22,6 +22,7 @@ OWNED_SETTINGS_MODULES: tuple[str, ...] = (
     "tai42_kit.llm.settings",
     "tai42_skeleton.conversations.settings",
     "tai42_skeleton.plugins.settings",
+    "tai42_skeleton.settings.public_base_url",
 )
 
 

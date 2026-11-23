@@ -31,7 +31,7 @@ from tai42_contract.states.rendered import (
     RenderedTemplateDeclarations,
     RenderedTemplateJq,
 )
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateRenderError
 from tai42_kit.states.template_jq import TemplateJqCompileError, compile_template_jq, input_order, template_jq_prelude
 from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
@@ -49,7 +49,7 @@ from tai42_skeleton.states.templates import (
     compose_effective_schema,
     validate_template,
 )
-from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
+from tai42_skeleton.states.templates.jq import template_jq_refusal
 from tai42_skeleton.template.references import assert_templates_stored
 from tai42_skeleton.template.settings import template_cache_settings
 
@@ -185,10 +185,8 @@ class _TemplateMixin(_StatesServiceBase):
             return
         try:
             rendered = await tai42_app.storage.resource_manager.render_templated_text(check)
-        except TEMPLATE_RENDER_ERRORS as exc:
-            raise TemplateValidationError(
-                f"template {template.name!r} declarations check {template_render_refusal(check, exc)}"
-            ) from exc
+        except TemplateRenderError as exc:
+            raise TemplateValidationError(f"template {template.name!r} declarations check {exc}") from exc
         try:
             await compile_check(rendered, variables=DECLARATIONS_CHECK_VARIABLES)
         except JqProgramError as exc:
@@ -207,10 +205,8 @@ class _TemplateMixin(_StatesServiceBase):
         """
         try:
             return await tai42_app.storage.resource_manager.render_templated_text(text)
-        except TEMPLATE_RENDER_ERRORS as exc:
-            raise TemplateValidationError(
-                f"template {template.name!r} template_jq {program_name!r} {template_render_refusal(text, exc)}"
-            ) from exc
+        except TemplateRenderError as exc:
+            raise TemplateValidationError(f"template {template.name!r} template_jq {program_name!r} {exc}") from exc
 
     async def _compile_by_id_template_jq(self, template: StateTemplate) -> None:
         """Render and compile a by-id ``template_jq`` program at the save door.
@@ -229,9 +225,7 @@ class _TemplateMixin(_StatesServiceBase):
         try:
             await compile_template_jq(programs, rendered)
         except TemplateJqCompileError as exc:
-            raise TemplateValidationError(
-                f"template {template.name!r} template_jq {exc.program!r} is not a valid jq expression: {exc}"
-            ) from exc
+            raise TemplateValidationError(f"template {template.name!r} {template_jq_refusal(exc)}") from exc
 
     async def _compile_by_id_reconcile(self, template: StateTemplate) -> None:
         """Render and compile a by-id ``reconcile`` program at the save door.
@@ -253,10 +247,8 @@ class _TemplateMixin(_StatesServiceBase):
                 continue
             try:
                 rendered = await tai42_app.storage.resource_manager.render_templated_text(text)
-            except TEMPLATE_RENDER_ERRORS as exc:
-                raise TemplateValidationError(
-                    f"template {template.name!r} reconcile {label} {template_render_refusal(text, exc)}"
-                ) from exc
+            except TemplateRenderError as exc:
+                raise TemplateValidationError(f"template {template.name!r} reconcile {label} {exc}") from exc
             try:
                 await compile_check(rendered, variables=RECONCILE_JQ_VARIABLES[label])
             except JqProgramError as exc:
@@ -355,10 +347,8 @@ class _TemplateMixin(_StatesServiceBase):
     async def _render_body(self, template: StateTemplate, where: str, text: TemplatedText) -> str:
         try:
             return await tai42_app.storage.resource_manager.render_templated_text(text)
-        except TEMPLATE_RENDER_ERRORS as exc:
-            raise TemplateValidationError(
-                f"template {template.name!r} {where} {template_render_refusal(text, exc)}"
-            ) from exc
+        except TemplateRenderError as exc:
+            raise TemplateValidationError(f"template {template.name!r} {where} {exc}") from exc
 
     async def _render_entry(self, template: StateTemplate, version_prefix: str | None) -> RenderedEntry:
         """Render every program body and the declarations check of ``template`` and order the input programs.

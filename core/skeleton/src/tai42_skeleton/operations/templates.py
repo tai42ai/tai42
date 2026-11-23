@@ -27,7 +27,7 @@ from jinja2 import TemplateError
 from pydantic import BaseModel
 from tai42_contract.app import tai42_app
 from tai42_contract.storage import StoragePathConflictError
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError, TemplateRenderError
 
 from tai42_skeleton.app.bus import FleetResult
 from tai42_skeleton.app.bus.ops import ClearTemplateCache, EvictTemplate
@@ -52,7 +52,6 @@ from tai42_skeleton.operations.store_keys import checked_store_key
 from tai42_skeleton.operations.template_door import template_door
 from tai42_skeleton.storage.entries import read_stored_entry
 from tai42_skeleton.storage.listing import listed_keys
-from tai42_skeleton.template import TemplateNotFoundError
 from tai42_skeleton.template.errors import PartialDirectoryDeleteError
 
 
@@ -267,11 +266,12 @@ async def render_template(text: TemplatedText) -> dict:
     """Render the one authored ``text`` — inline ``content`` OR a stored ``id`` — with its ``kwargs``.
 
     ``text`` carries EXACTLY ONE source: its own type refuses neither and both, so a
-    caller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id`` that
-    cannot be fetched is a ``404`` naming that id; broken client-supplied Jinja (a syntax
-    error, a sandbox-blocked dunder traversal → ``SecurityError``, an undefined access)
-    is author error → ``400``, as is a stored ``id`` naming an object that is not UTF-8
-    text. Genuine storage failures raise other types (``500``).
+    caller supplying the wrong shape is a loud ``400`` at the edge. A stored ``id``, or an id
+    the body includes, that names no stored template is a ``404`` naming it; any other text
+    that cannot be rendered as authored (a body that does not parse or render — a syntax
+    error, a construct the sandbox refuses, an undefined access — or a stored object that is
+    not UTF-8 text) is author error → ``400``. Genuine storage failures raise other types
+    (``500``).
     """
     # A stored id is a caller-supplied logical key: run it through the containment guard
     # (which maps an escape to a loud 400) before it reaches the store.
@@ -280,9 +280,9 @@ async def render_template(text: TemplatedText) -> dict:
     try:
         rendered = await tai42_app.storage.resource_manager.render_templated_text(text)
     except TemplateNotFoundError as exc:
-        raise NotFoundError(str(exc)) from exc
-    except TemplateError as exc:
-        raise BadRequestError(f"template error: {exc}") from exc
+        raise NotFoundError(f"text {exc}") from exc
+    except TemplateRenderError as exc:
+        raise BadRequestError(f"text {exc}") from exc
     return {"rendered": rendered}
 
 

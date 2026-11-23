@@ -26,7 +26,7 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.marketplace.compat import CorePluginBootError
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
-from .._helpers import await_add_event
+from .._helpers import await_add_event, set_public_base_url
 
 _BUILTIN_MODULE = "tai42_skeleton.extensions.builtin.ask_external"
 
@@ -265,7 +265,8 @@ def test_config_on_config_agnostic_extension_rejected_at_apply_site():
 
 
 async def test_end_to_end_answer_delivered(monkeypatch, fake_redis, fake_client_ctx):
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     store = InteractionStore(settings.key_prefix)
@@ -285,7 +286,8 @@ async def test_end_to_end_answer_delivered(monkeypatch, fake_redis, fake_client_
 async def test_sync_wrapped_tool_works(monkeypatch, fake_redis, fake_client_ctx):
     # A synchronous wrapped tool (returns a plain str, not a coroutine) must work
     # too — the wrapper awaits only when the result is awaitable.
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     store = InteractionStore(settings.key_prefix)
@@ -306,7 +308,8 @@ async def test_author_bound_verifier_lands_in_format_payload(monkeypatch, fake_r
     # must be threaded through ask -> _build_payload into the persisted
     # external ``format_payload`` — regardless of any agent input, since it is not
     # an LLM-facing param.
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
     store = InteractionStore(settings.key_prefix)
@@ -388,7 +391,8 @@ async def test_verifier_rejected_at_ask_time_when_malformed_or_unknown(monkeypat
     # into an open, unverified one at the callback door.
     from tai42_skeleton.interactions.helper import ask
 
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
 
@@ -422,10 +426,12 @@ _ANSWER_SCHEMA_RESOURCES = {
 class _AnswerResourceManager:
     async def render_templated_text(self, text, locale=None):
         if text.id is not None:
-            from tai42_skeleton.template.errors import TemplateNotFoundError
+            from tai42_contract.template import TemplateNotFoundError
 
             if text.id not in _ANSWER_SCHEMA_RESOURCES:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return _ANSWER_SCHEMA_RESOURCES[text.id]
         assert text.content is not None
         return text.content
@@ -465,7 +471,7 @@ async def test_answer_schema_by_id_unfetchable_fails_loudly(monkeypatch) -> None
         return "https://ext.example/go"
 
     composed = ask_external(make_url, "make_url", "desc")
-    with tai42_app.bound(_AnswerApp()), pytest.raises(SchemaBodyError, match="could not be rendered"):
+    with tai42_app.bound(_AnswerApp()), pytest.raises(SchemaBodyError, match="which could not be fetched"):
         await composed(question="Approve?", answer_schema=TemplatedText(id="missing-answer"))
 
 

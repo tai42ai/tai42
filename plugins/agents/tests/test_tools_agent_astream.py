@@ -20,7 +20,7 @@ from tai42_contract.agent import (
     ToolResultStep,
 )
 from tai42_contract.agent.base import PresetSpec
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from ._tools_agent_support import (
     _STRUCTURED_SCHEMA,
@@ -156,7 +156,7 @@ def test_astream_unknown_template_id_raises_loudly(monkeypatch: pytest.MonkeyPat
     reaching the run as an empty message."""
     _script_astream(monkeypatch, [MessageFinal(text="ok")], {})
     agent = _get_agent()
-    with pytest.raises(RuntimeError, match="unknown template id: nope"):
+    with pytest.raises(TemplateNotFoundError, match="'nope'"):
         _collect(agent, user_message=TemplatedText(id="nope"))
 
 

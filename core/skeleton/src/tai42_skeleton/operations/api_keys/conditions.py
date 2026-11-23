@@ -4,16 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from jinja2 import TemplateError
 from pydantic import ValidationError
 from tai42_contract.access_control.models import AccessCondition, JqAuthContext
+from tai42_contract.template import TemplateRenderError
 from tai42_kit.utils.data import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.access_control.policy import ConditionVerdict, PolicyEnforcer, render_condition
 from tai42_skeleton.operations import BadRequestError, operation
 from tai42_skeleton.operations.response_models.api_keys import ConditionCheckResult
-from tai42_skeleton.template import TemplateNotFoundError
 
 from .models import ConditionValidation
 
@@ -64,12 +63,12 @@ async def validate_condition(
                 "condition renders empty, which denies at enforcement and would lock the key out; "
                 "author a condition that renders to a non-empty jq expression"
             )
-    except (JqProgramError, ValidationError, TemplateError, TemplateNotFoundError) as exc:
+    except (JqProgramError, ValidationError, TemplateRenderError) as exc:
         # AUTHOR errors only — the jq seam's ``JqProgramError`` (the condition does not
         # compile, raised while it ran, ran past its budget, or emitted nothing), the
-        # pydantic ``ValidationError`` from a malformed ``sample_context``, a jinja
-        # ``TemplateError`` from a broken inline condition, and ``TemplateNotFoundError``
-        # for a missing stored condition ``id``. Their message is the actionable feedback
+        # pydantic ``ValidationError`` from a malformed ``sample_context``, and the render
+        # seam's ``TemplateRenderError`` for a condition that cannot be rendered as
+        # authored (a missing stored ``id`` included). Their message is the actionable feedback
         # the author needs, surfaced verbatim as a 400. Any other exception (an
         # unconfigured resource manager ``RuntimeError``, a redis/storage outage, a
         # compute-pool fault) is a server fault and propagates as a loud 500.

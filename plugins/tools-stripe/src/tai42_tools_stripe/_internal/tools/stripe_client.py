@@ -460,7 +460,7 @@ async def post_answer(callback_url: str, payload: dict[str, Any]) -> dict[str, A
     """
     prefix = tai42_app.interactions.callback_url_prefix()
     if prefix is None:
-        raise ValueError("INTERACTIONS_PUBLIC_BASE_URL is not set; the platform mints no callback URL to pin against")
+        raise ValueError("TAI_PUBLIC_BASE_URL is not set; the platform mints no callback URL to pin against")
     # Only the exact shape the platform mints passes; a refusal is a CallbackUrlRefusedError.
     pin_callback_url(callback_url, prefix=prefix)
     secret = stripe_settings().bridge_callback_secret

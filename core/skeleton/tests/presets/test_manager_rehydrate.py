@@ -15,6 +15,7 @@ from tai42_contract.presets import PresetBody
 from tai42_skeleton.app.instance import app
 from tai42_skeleton.exceptions.exceptions import TaiValidationError
 
+from .._fakes.recording_storage import RecordingStorage
 from ._manager_fixtures import FakeVersioningPg, _create_versioned, _live_tool_names, _manifest
 
 
@@ -301,14 +302,20 @@ _OPEN_SCHEMA = {"type": "object", "properties": {"where": {"type": "string"}}, "
         ),
         ({"input_map": "{payload: .}"}, "an input map needs an input schema that describes what the caller sends"),
         ({"output_map": "{"}, "output_map does not compile: "),
-        ({"output_map": {"id": "no-such-program"}}, "preset 'stored' output_map"),
+        (
+            {"output_map": {"id": "no-such-program"}},
+            "preset 'stored' output_map references stored id 'no-such-program', which could not be fetched",
+        ),
     ],
 )
 def test_rehydrate_quarantines_a_stored_body_its_input_or_output_rules_refuse(
-    pg: FakeVersioningPg, caplog, over, reason
+    pg: FakeVersioningPg, caplog, monkeypatch: pytest.MonkeyPatch, over, reason
 ):
     # A stored body (a restored backup, say) the preset's input and output rules refuse is
-    # quarantined with the rule's own text, never bound.
+    # quarantined with the rule's own text, never bound. The store is empty, so a by-id map
+    # names a template that is not stored.
+    monkeypatch.setattr(app._storage_registry, "_provider", RecordingStorage({}))
+
     async def run():
         async with app.app_context(_manifest()):
             mgr = app.preset_manager

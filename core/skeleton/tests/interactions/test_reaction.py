@@ -205,6 +205,27 @@ async def test_update_naming_undeclared_field_is_a_handler_error(wired, monkeypa
         await react("r1", {"kind": "field_changed", "field": "name"}, {"name": "x"})
 
 
+async def test_update_null_value_clears_a_declared_field(wired, monkeypatch):
+    await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
+    _stub_handler(monkeypatch, returns={"values": {"name": None, "tags": None, "n": None}})
+    update = await react("r1", {"kind": "field_changed", "field": "name"}, {"name": "x"})
+    assert update == {"values": {"name": None, "tags": None, "n": None}}
+
+
+async def test_update_null_value_on_an_undeclared_field_is_a_handler_error(wired, monkeypatch):
+    await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
+    _stub_handler(monkeypatch, returns={"values": {"ghost": None}})
+    with pytest.raises(FormReactionHandlerError, match="undeclared fields"):
+        await react("r1", {"kind": "field_changed", "field": "name"}, {"name": "x"})
+
+
+async def test_update_non_null_wrong_type_beside_a_clear_is_a_handler_error(wired, monkeypatch):
+    await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
+    _stub_handler(monkeypatch, returns={"values": {"name": None, "n": "many"}})
+    with pytest.raises(FormReactionHandlerError, match="do not fit the schema"):
+        await react("r1", {"kind": "field_changed", "field": "name"}, {"name": "x"})
+
+
 async def test_update_options_require_an_option_bearing_field(wired, monkeypatch):
     await wired.store.add(wired.fake, _reacting(wired.store, reactions={"field_changed": ["name"]}), idle_ttl=86400)
     _stub_handler(monkeypatch, returns={"options": {"name": [{"value": "x"}]}})

@@ -82,7 +82,7 @@ def _resolve_ticket(stack: TaiStack, interaction_id: str) -> str:
     raise AssertionError(f"no callback ticket in Redis for interaction {interaction_id}")
 
 
-@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
+@pytest.mark.needs("store:redis", "setting:TAI_PUBLIC_BASE_URL")
 async def test_form_data_pages_render_prefilled_stepped_and_the_post_carries_every_field(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
@@ -171,7 +171,7 @@ _SHAPED_SCHEMA = {
 }
 
 
-@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
+@pytest.mark.needs("store:redis", "setting:TAI_PUBLIC_BASE_URL")
 async def test_form_shapes_ride_the_page_and_the_door_refuses_with_the_fields_sentence(
     replicas_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:

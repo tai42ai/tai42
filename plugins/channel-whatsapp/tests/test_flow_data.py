@@ -35,7 +35,8 @@ from tai42_channel_whatsapp.flows_endpoint import ENDPOINT_BODY_MAX_BYTES, echoe
 from tai42_channel_whatsapp.flows_resolve import pages_without_picture_content
 from tai42_channel_whatsapp.flows_send_data import build_flow_data
 from tai42_channel_whatsapp.flows_shapes import channel_word
-from tai42_channel_whatsapp.inbound.data_exchange import _partial_values, _screen_fields
+from tai42_channel_whatsapp.inbound.form_geometry import screen_fields
+from tai42_channel_whatsapp.inbound.step_values import partial_values
 
 from .conftest import (
     APP_SECRET,
@@ -54,8 +55,8 @@ def test_partial_values_unwraps_a_single_pick_chips_string():
     # A single-pick chips string's partial value arrives as a one-element list and is unwrapped to
     # the string the react facet type-checks; an unfilled (empty-list) chips is omitted.
     props = {"pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips"}}
-    assert _partial_values({"pick": ["b"], "tai42_event": "field_changed"}, props) == {"pick": "b"}
-    assert _partial_values({"pick": []}, props) == {}
+    assert partial_values({"pick": ["b"], "tai42_event": "field_changed"}, props) == {"pick": "b"}
+    assert partial_values({"pick": []}, props) == {}
 
 
 def test_partial_values_splits_a_merged_range_object_onto_the_two_date_keys():
@@ -64,7 +65,7 @@ def test_partial_values_splits_a_merged_range_object_onto_the_two_date_keys():
         "end": {"type": "string", "format": "date", "rangeStart": "start"},
     }
     data = {"start": {"start-date": "2026-05-01", "end-date": "2026-05-04"}, "tai42_event": "submitted"}
-    assert _partial_values(data, props) == {"start": "2026-05-01", "end": "2026-05-04"}
+    assert partial_values(data, props) == {"start": "2026-05-01", "end": "2026-05-04"}
 
 
 _FLOW_PATH = "/flow-data"
@@ -870,6 +871,59 @@ async def test_reaction_values_set_a_single_pick_chips_init_as_a_one_element_lis
     assert out["data"]["pick__init"] == ["c"]
 
 
+_CLEAR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "note": {"type": "string"},
+        "pick": {"type": "string", "enum": ["a", "b", "c"], "control": "chips"},
+        "agree": {"type": "boolean"},
+        "day": {"type": "string", "format": "date"},
+    },
+}
+
+
+@pytest.mark.parametrize(("field", "empty"), [("note", ""), ("pick", []), ("agree", False), ("day", "")])
+async def test_a_field_changed_reaction_clearing_a_field_sets_its_init_to_the_empty_value(
+    field: str, empty: object, flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await cache_endpoint_form(_TOKEN, _reacting_form(_CLEAR_SCHEMA, None), datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = {"values": {field: None}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {
+            "tai42_event": "field_changed",
+            "tai42_field": "note",
+            "note": "hi",
+            "pick": ["b"],
+            "agree": True,
+            "day": "2026-05-01",
+        },
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"][f"{field}__init"] == empty
+
+
+async def test_a_submitted_reaction_clearing_a_filled_optional_field_completes_without_it(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await _seed(fake_redis)
+    stub_app.interactions.react_result = {"values": {"total": None}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "submitted", "tier": "g", "total": "42"},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SUCCESS"
+    assert out["data"]["extension_message_response"]["params"] == {"flow_token": _TOKEN, "tier": "g"}
+
+
 async def test_page_advance_applies_reaction_options_and_defaults_unfilled_val(
     flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
 ):
@@ -889,6 +943,289 @@ async def test_page_advance_applies_reaction_options_and_defaults_unfilled_val(
     out = _decrypt_response(await flow_handler(request), aes_key, iv)
     assert out["screen"] == "SCREEN_B"
     assert out["data"]["tier__ds"] == [{"id": "s", "title": "Silver"}]
+
+
+_REPLACED_LIST_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "plan": {"type": "string", "enum": ["basic", "pro", "max"]},
+        "extras": {"type": "array", "items": {"type": "string", "enum": ["a", "b", "c"]}},
+        "note": {"type": "string"},
+    },
+}
+
+
+async def _replaced_list_answer(
+    flow_handler, stub_app: _StubApp, react_result: dict[str, Any], data: dict[str, Any], pages=None
+) -> dict[str, Any]:
+    form = _reacting_form(_REPLACED_LIST_SCHEMA, pages)
+    await cache_endpoint_form(_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    stub_app.interactions.react_result = react_result
+    payload = {"action": "data_exchange", "flow_token": _TOKEN, "screen": "SCREEN_A", "data": data}
+    request, aes_key, iv = _request(payload)
+    return _decrypt_response(await flow_handler(request), aes_key, iv)
+
+
+async def test_a_reaction_replacing_a_list_drops_a_single_pick_it_no_longer_offers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _replaced_list_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"plan": [{"value": "pro"}, {"value": "max"}]}},
+        {"tai42_event": "field_changed", "tai42_field": "note", "plan": "basic", "note": "hi"},
+    )
+    assert out["data"]["plan__ds"] == [{"id": "pro", "title": "pro"}, {"id": "max", "title": "max"}]
+    assert out["data"]["plan__init"] == ""
+    assert out["data"]["note__init"] == "hi"
+
+
+async def test_a_reaction_replacing_a_list_keeps_the_multi_entries_it_still_offers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _replaced_list_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"extras": [{"value": "b"}, {"value": "c"}], "plan": [{"value": "basic"}]}},
+        {"tai42_event": "field_changed", "tai42_field": "note", "plan": "basic", "extras": ["a", "b"]},
+    )
+    assert out["data"]["extras__init"] == ["b"]
+    assert out["data"]["plan__init"] == "basic"
+
+
+async def test_a_reaction_value_lays_over_its_replaced_list_unfiltered(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _replaced_list_answer(
+        flow_handler,
+        stub_app,
+        {
+            "options": {"plan": [{"value": "pro"}], "extras": [{"value": "c"}]},
+            "values": {"plan": "max", "extras": ["a"]},
+        },
+        {"tai42_event": "field_changed", "tai42_field": "note", "plan": "basic", "extras": ["b"]},
+    )
+    assert out["data"]["plan__init"] == "max"
+    assert out["data"]["extras__init"] == ["a"]
+
+
+async def test_a_page_advance_replacing_lists_drops_the_collected_and_the_later_picks_they_no_longer_offer(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # The collected pick rides forward as its ``__val``; the later field's pick is the ``__init``
+    # carrier the send started it with.
+    pages = [
+        {"title": "First", "fields": ["plan"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["extras", "note"], "kind": "input", "display": []},
+    ]
+    out = await _replaced_list_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"plan": [{"value": "pro"}], "extras": [{"value": "b"}, {"value": "c"}]}},
+        {"tai42_event": "page_advanced", "tai42_page": "First", "plan": "basic", "extras__init": ["a", "c"]},
+        pages,
+    )
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["plan__val"] == ""
+    assert out["data"]["extras__init"] == ["c"]
+
+
+async def test_a_submit_reaction_replacing_a_list_completes_without_the_pick_it_no_longer_offers(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _replaced_list_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"plan": [{"value": "pro"}], "extras": [{"value": "b"}]}},
+        {"tai42_event": "submitted", "plan": "basic", "extras": ["a", "b"], "note": "hi"},
+    )
+    assert out["screen"] == "SUCCESS"
+    assert out["data"]["extension_message_response"]["params"] == {"flow_token": _TOKEN, "extras": ["b"], "note": "hi"}
+
+
+_DEMANDING_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "plan": {"type": "string", "enum": ["basic", "pro", "max"], "title": "Plan"},
+        "extras": {
+            "type": "array",
+            "items": {"type": "string", "enum": ["a", "b", "c"]},
+            "minItems": 2,
+            "title": "Extras",
+        },
+        "note": {"type": "string"},
+    },
+    "required": ["plan", "extras"],
+}
+
+
+def _judging_shapes(stub_app: _StubApp) -> None:
+    # The fake shape check judges the values it is given: a demanded field left out is REQUIRED,
+    # an ``extras`` under two entries is MIN_ITEMS.
+    def judge(question, values, *, fields=None, partial=False):
+        stub_app.interactions.shape_calls.append({"values": dict(values), "fields": fields, "partial": partial})
+        errors = []
+        for name in ("plan", "extras"):
+            if fields is not None and name not in fields:
+                continue
+            if name not in values:
+                if not partial:
+                    errors.append(_shape_error(name, FormShapeKind.REQUIRED, "This field is required"))
+            elif name == "extras" and len(values[name]) < 2:
+                errors.append(_shape_error(name, FormShapeKind.MIN_ITEMS, "Pick at least 2", limit=2))
+        return errors
+
+    stub_app.interactions.form_shape_errors = judge  # type: ignore[method-assign]
+
+
+async def _demanding_answer(
+    flow_handler, stub_app: _StubApp, react_result: dict[str, Any], data: dict[str, Any], pages=None
+) -> dict[str, Any]:
+    form = dataclasses.replace(
+        _reacting_form(_DEMANDING_SCHEMA, pages), required={"plan": "Choose a plan", "extras": "Choose two extras"}
+    )
+    await cache_endpoint_form(_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    _judging_shapes(stub_app)
+    stub_app.interactions.react_result = react_result
+    payload = {"action": "data_exchange", "flow_token": _TOKEN, "screen": "SCREEN_A", "data": data}
+    request, aes_key, iv = _request(payload)
+    return _decrypt_response(await flow_handler(request), aes_key, iv)
+
+
+async def test_a_submit_reaction_dropping_a_required_pick_keeps_the_form_with_the_required_sentence(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _demanding_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"plan": [{"value": "pro"}, {"value": "max"}]}},
+        {"tai42_event": "submitted", "plan": "basic", "extras": ["a", "b"], "note": "hi"},
+    )
+    assert out["screen"] == "SCREEN_A"
+    assert "extension_message_response" not in out["data"]
+    assert out["data"]["plan__ds"] == [{"id": "pro", "title": "pro"}, {"id": "max", "title": "max"}]
+    assert out["data"]["plan__init"] == ""
+    assert out["data"]["plan__err"] == "Choose a plan"
+    assert out["data"]["error_message"] == "Plan: Choose a plan"
+    assert out["data"]["extras__init"] == ["a", "b"]
+
+
+async def test_a_submit_reaction_dropping_a_multi_pick_under_its_min_items_keeps_the_form(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _demanding_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"extras": [{"value": "b"}, {"value": "c"}]}},
+        {"tai42_event": "submitted", "plan": "pro", "extras": ["a", "b"]},
+    )
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["extras__ds"] == [{"id": "b", "title": "b"}, {"id": "c", "title": "c"}]
+    assert out["data"]["extras__init"] == ["b"]
+    assert out["data"]["extras__err"] == channel_word(FormShapeKind.MIN_ITEMS, {"limit": 2})
+    assert out["data"]["error_message"] == "Extras: Pick at least 2"
+
+
+async def test_a_submit_reaction_emptying_a_required_multi_pick_keeps_the_form_with_the_required_sentence(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # A multi pick its new list leaves empty is unfilled, as the person's own empty pick is.
+    out = await _demanding_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"extras": [{"value": "c"}]}},
+        {"tai42_event": "submitted", "plan": "pro", "extras": ["a", "b"]},
+    )
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["extras__init"] == []
+    assert out["data"]["extras__err"] == "Choose two extras"
+
+
+async def test_a_submit_reaction_setting_a_newly_offered_value_completes(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    out = await _demanding_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"plan": [{"value": "pro"}]}, "values": {"plan": "pro"}},
+        {"tai42_event": "submitted", "plan": "basic", "extras": ["a", "b"]},
+    )
+    assert out["screen"] == "SUCCESS"
+    assert out["data"]["extension_message_response"]["params"] == {
+        "flow_token": _TOKEN,
+        "Plan": "pro",
+        "Extras": ["a", "b"],
+    }
+
+
+async def test_a_page_advance_reaction_dropping_a_multi_pick_under_its_min_items_stays_on_the_screen(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    pages = [
+        {"title": "First", "fields": ["extras"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["plan", "note"], "kind": "input", "display": []},
+    ]
+    out = await _demanding_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"extras": [{"value": "b"}, {"value": "c"}]}},
+        {"tai42_event": "page_advanced", "tai42_page": "First", "extras": ["a", "b"]},
+        pages,
+    )
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["extras__init"] == ["b"]
+    assert out["data"]["extras__err"] == channel_word(FormShapeKind.MIN_ITEMS, {"limit": 2})
+
+
+async def test_a_page_advance_reaction_dropping_a_required_pick_stays_on_the_screen_with_the_required_sentence(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # The answer a reaction folded demands this screen's required fields: a withdrawn pick is missing.
+    pages = [
+        {"title": "First", "fields": ["plan"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["extras", "note"], "kind": "input", "display": []},
+    ]
+    out = await _demanding_answer(
+        flow_handler,
+        stub_app,
+        {"options": {"plan": [{"value": "pro"}]}},
+        {"tai42_event": "page_advanced", "tai42_page": "First", "plan": "basic"},
+        pages,
+    )
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["plan__ds"] == [{"id": "pro", "title": "pro"}]
+    assert out["data"]["plan__init"] == ""
+    assert out["data"]["plan__err"] == "Choose a plan"
+    assert out["data"]["error_message"] == "Plan: Choose a plan"
+    assert stub_app.interactions.shape_calls[-1] == {"values": {}, "fields": ["plan"], "partial": False}
+
+
+async def test_a_page_advance_without_a_reaction_checks_the_screen_with_nothing_demanded(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    # WhatsApp demands the screen's required controls itself; the person's own values are checked
+    # for their shapes only, and the form moves on.
+    pages = [
+        {"title": "First", "fields": ["extras"], "kind": "input", "display": []},
+        {"title": "Second", "fields": ["plan", "note"], "kind": "input", "display": []},
+    ]
+    form = dataclasses.replace(
+        _reacting_form(_DEMANDING_SCHEMA, pages), reactions=None, required={"plan": "Choose a plan"}
+    )
+    await cache_endpoint_form(_TOKEN, form, datetime.now(UTC) + timedelta(minutes=5))
+    _judging_shapes(stub_app)
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "page_advanced", "tai42_page": "First", "extras": ["a", "b"]},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert stub_app.interactions.shape_calls == [
+        {"values": {"extras": ["a", "b"]}, "fields": ["extras"], "partial": True}
+    ]
 
 
 async def test_reaction_error_message_uses_the_field_title_not_the_key(
@@ -970,6 +1307,94 @@ async def test_page_advance_forwards_a_merged_range_val_carrier(
     assert out["screen"] == "SCREEN_B"
     assert out["data"]["start__val"] == {"start-date": "2026-05-01", "end-date": "2026-05-04"}
     assert "end__val" not in out["data"]
+
+
+_DATES_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date", "rangeStart": "start"},
+        "note": {"type": "string"},
+    },
+}
+_DATES_PAGES = [
+    {"title": "Dates", "fields": ["start", "end"], "kind": "input", "display": []},
+    {"title": "Note", "fields": ["note"], "kind": "input", "display": []},
+]
+
+
+@pytest.mark.parametrize(
+    ("carried", "values", "expected"),
+    [
+        # An unpicked end arrives as ``""`` and stays unpicked under the reaction's start.
+        (
+            {"start-date": "2026-04-01", "end-date": ""},
+            {"start": "2026-05-01"},
+            {"start-date": "2026-05-01", "end-date": ""},
+        ),
+        # The end the person picked is kept under the reaction's start.
+        (
+            {"start-date": "2026-04-01", "end-date": "2026-05-04"},
+            {"start": "2026-05-01"},
+            {"start-date": "2026-05-01", "end-date": "2026-05-04"},
+        ),
+        # A reaction on the END re-shapes the START's pair object.
+        (
+            {"start-date": "2026-04-01", "end-date": "2026-05-04"},
+            {"end": "2026-05-09"},
+            {"start-date": "2026-04-01", "end-date": "2026-05-09"},
+        ),
+        ({"start-date": "2026-04-01", "end-date": ""}, {"start": None}, {"start-date": "", "end-date": ""}),
+        (
+            {"start-date": "2026-04-01", "end-date": "2026-05-04"},
+            {"end": None},
+            {"start-date": "2026-04-01", "end-date": ""},
+        ),
+    ],
+)
+async def test_a_reaction_on_a_merged_range_member_reshapes_the_starts_pair_init(
+    carried: dict, values: dict, expected: dict, flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await cache_endpoint_form(
+        _TOKEN, _reacting_form(_DATES_SCHEMA, _DATES_PAGES), datetime.now(UTC) + timedelta(minutes=5)
+    )
+    stub_app.interactions.react_result = {"values": values}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {"tai42_event": "field_changed", "tai42_field": "start", "start": carried},
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_A"
+    assert out["data"]["start__init"] == expected
+    assert "end__init" not in out["data"]
+
+
+async def test_a_reaction_on_a_merged_range_member_keeps_the_other_end_in_the_advanced_val(
+    flow_env, flow_handler, stub_app: _StubApp, fake_redis: FakeRedis
+):
+    await cache_endpoint_form(
+        _TOKEN, _reacting_form(_DATES_SCHEMA, _DATES_PAGES), datetime.now(UTC) + timedelta(minutes=5)
+    )
+    stub_app.interactions.react_result = {"values": {"start": "2026-05-02"}}
+    payload = {
+        "action": "data_exchange",
+        "flow_token": _TOKEN,
+        "screen": "SCREEN_A",
+        "data": {
+            "tai42_event": "page_advanced",
+            "tai42_page": "Dates",
+            "start": {"start-date": "2026-05-01", "end-date": "2026-05-04"},
+        },
+    }
+    request, aes_key, iv = _request(payload)
+    out = _decrypt_response(await flow_handler(request), aes_key, iv)
+    assert out["screen"] == "SCREEN_B"
+    assert out["data"]["start__val"] == {"start-date": "2026-05-02", "end-date": "2026-05-04"}
+    assert "end__val" not in out["data"]
+    assert "end__init" not in out["data"]
 
 
 # --- the in-form shape check: a broken shape keeps the person on the screen ---------------
@@ -1680,10 +2105,10 @@ async def _seed_timed(pages: list[dict[str, Any]] | None) -> None:
 
 
 def test_screen_fields_lists_each_time_right_after_its_date():
-    fields_by_screen, current = _screen_fields(_timed_form(_TIMED_PAGES), "SCREEN_A")
+    fields_by_screen, current = screen_fields(_timed_form(_TIMED_PAGES), "SCREEN_A")
     assert current == 0
     assert fields_by_screen == [["start", "start_time", "end", "end_time"], ["note"]]
-    page_less, _ = _screen_fields(_timed_form(None), "SCREEN_A")
+    page_less, _ = screen_fields(_timed_form(None), "SCREEN_A")
     assert page_less == [["start", "start_time", "end", "end_time", "note"]]
 
 
@@ -1704,7 +2129,7 @@ def test_screen_fields_put_a_merged_end_and_its_time_after_the_start_time():
     form = EndpointForm(
         schema=_SPLIT_SCHEMA, pages=None, reactions=None, option_fields=[], invalid={}, required={}, lines={}
     )
-    fields_by_screen, _ = _screen_fields(form, "SCREEN_A")
+    fields_by_screen, _ = screen_fields(form, "SCREEN_A")
     assert fields_by_screen == [["start", "start_time", "end", "end_time", "note"]]
 
 

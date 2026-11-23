@@ -29,6 +29,8 @@ from tai42_skeleton.interactions.served_media import load_served_media
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store import InteractionStore
 
+from .._helpers import set_public_base_url
+
 _PNG = bytes.fromhex("89504e470d0a1a0a") + b"\x00" * 24
 _DATA_PNG = f"data:image/png;base64,{base64.b64encode(_PNG).decode()}"
 _NOT_FOUND = "stored media not found"
@@ -52,7 +54,8 @@ class _CountingStorage:
 def outbound(monkeypatch: pytest.MonkeyPatch, fake_redis, fake_client_ctx):
     # The outbound Redis store, configured; no conversations store, so no inbound record exists.
     monkeypatch.delenv("CONVERSATIONS_REDIS_URL", raising=False)
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(served_media, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(served_media, "interactions_settings", lambda: settings)
     monkeypatch.setattr(served_media, "interactions_store_configured", lambda: True)

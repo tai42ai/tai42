@@ -33,11 +33,11 @@ from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.conversations import working_signal
 from tai42_skeleton.conversations.turn.completion_delivery import COMPLETION_TOOL_NAME, DELIVER_TOOL_COMPLETION_NAME
 from tai42_skeleton.interactions import ask
-from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.ask import wait as wait_module
 from tai42_skeleton.interactions.ask.errors import InteractionTimeoutError
 from tai42_skeleton.interactions.run_completion import run_completion_id
 
+from .._helpers import set_public_base_url
 from ._continuation_support import configure_interactions_store, make_wired
 
 RUN_DELIVERY = "rd-ask"
@@ -159,8 +159,7 @@ async def test_an_async_ask_pauses_the_signal_and_leaves_its_question_standing(w
 async def test_a_channel_ask_whose_delivery_fails_withdraws_its_question(
     wired, calls, in_run, register_channel, monkeypatch
 ):
-    settings = wired.settings.model_copy(update={"public_base_url": "https://host.example"})
-    monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
+    set_public_base_url(monkeypatch, "https://host.example")
     register_channel("line", _RefusingChannel())
     with pytest.raises(ValueError, match="no such recipient"):
         await ask("proceed?", channel="line", recipient=ADDRESS, timeout=5)

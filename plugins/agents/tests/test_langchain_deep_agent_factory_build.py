@@ -12,7 +12,7 @@ from langchain.agents.structured_output import ToolStrategy
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.llm.middleware.leading_user import LeadingUserMiddleware
 from tai42_kit.llm.middleware.rolling_cache_mark import RollingCacheMarkMiddleware
 from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
@@ -88,7 +88,7 @@ def test_resolve_subagent_missing_system_prompt_id_raises(resource_manager: Any)
     """A by-id system prompt whose resource is absent fails loudly at the point of use,
     never renders as empty text."""
     spec = ResolvedSubAgentSpec(name="b", description="d", system_prompt=TemplatedText(id="absent"))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(TemplateNotFoundError, match="'absent'"):
         asyncio.run(_resolve_subagent(spec))
 
 

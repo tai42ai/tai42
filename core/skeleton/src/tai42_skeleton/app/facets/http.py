@@ -29,6 +29,10 @@ class HttpFacet(_Facet):
         """Return the URL prefix custom routes and mounts are served under."""
         return self._app._http_surface.mount_base()
 
+    def public_base_url(self) -> str | None:
+        """Return the deployment's public address (``TAI_PUBLIC_BASE_URL``); ``None`` while unset."""
+        return self._app._http_surface.public_base_url()
+
     def hosted_ui(self) -> HostedUiPaths:
         """Return the page addresses of the hosted UI, as the deployment declares them."""
         return self._app._http_surface.hosted_ui()

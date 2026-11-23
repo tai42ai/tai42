@@ -16,7 +16,7 @@ import hmac
 import json
 import secrets
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Collection, Iterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -28,7 +28,7 @@ import pytest
 from starlette.requests import Request
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ChannelDelivery, InboundAnswerOutcome, InboundAnswerResult
-from tai42_contract.interactions import FormReactionEvent
+from tai42_contract.interactions import AnswerFormat, FormReactionEvent, FormShapeError, QuestionFormat
 from tai42_contract.interactions.models import (
     MEDIA_ROUTE_PREFIX,
     IngestedMedia,
@@ -130,22 +130,56 @@ class _StubChannels:
 
 
 class _StubInteractions:
-    """Stands in for the skeleton's ``app.interactions`` reaction chokepoint.
+    """Stands in for the skeleton's ``app.interactions`` reaction chokepoint and shape check.
 
-    The plugin's test venv cannot import the skeleton that hosts the real ``react`` facet, so
-    it is faked at this contract seam. A test sets ``react_result`` (a form update) or
-    ``react_error`` (raised, standing in for a closed/malformed/handler failure) and reads back
-    the recorded ``react`` calls."""
+    The plugin's test venv cannot import the skeleton that hosts the real ``react`` and
+    ``form_shape_errors`` facets, so they are faked at this contract seam. A test sets
+    ``react_result`` (a form update) or ``react_error`` (raised, standing in for a
+    closed/malformed/handler failure) and reads back the recorded ``react`` calls; it sets
+    ``shape_judge`` (the values checked -> their shape errors; none when unset) and reads back the
+    recorded ``form_shape_errors`` calls. ``question_format`` builds the FORM question from the ask's
+    arguments, as the ask door's mapping does."""
 
     def __init__(self) -> None:
         self.react_calls: list[SimpleNamespace] = []
         self.react_result: dict[str, Any] = {}
         self.react_error: BaseException | None = None
+        self.shape_calls: list[SimpleNamespace] = []
+        self.shape_judge: Callable[[Mapping[str, Any]], list[FormShapeError]] | None = None
 
     def reset(self) -> None:
         self.react_calls.clear()
         self.react_result = {}
         self.react_error = None
+        self.shape_calls.clear()
+        self.shape_judge = None
+
+    def question_format(
+        self,
+        answer_format: str,
+        *,
+        options: list[str] | None = None,
+        schema: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        pages: list[dict[str, Any]] | None = None,
+        reactions: dict[str, Any] | None = None,
+    ) -> QuestionFormat:
+        payload: dict[str, Any] = {"schema": schema}
+        for key, value in (("data", data), ("pages", pages), ("reactions", reactions)):
+            if value is not None:
+                payload[key] = value
+        return QuestionFormat(answer_format=AnswerFormat(answer_format), format_payload=payload)
+
+    def form_shape_errors(
+        self,
+        question: QuestionFormat,
+        values: Mapping[str, Any],
+        *,
+        fields: Collection[str] | None = None,
+        partial: bool = False,
+    ) -> list[FormShapeError]:
+        self.shape_calls.append(SimpleNamespace(question=question, values=dict(values), fields=fields, partial=partial))
+        return self.shape_judge(values) if self.shape_judge is not None else []
 
     async def react(
         self, interaction_id: str, event: FormReactionEvent, partial_values: dict[str, Any]

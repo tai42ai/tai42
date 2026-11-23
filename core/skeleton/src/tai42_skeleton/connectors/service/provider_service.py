@@ -20,8 +20,8 @@ from urllib.parse import urlsplit
 
 from tai42_contract.connectors.models import AddServerRequest
 from tai42_contract.connectors.providers import McpServerDescriptor, ProviderDescriptor, SubServiceDescriptor
+from tai42_contract.urls import is_loopback_host
 from tai42_kit.db import component_store_configured
-from tai42_kit.net import is_loopback_host
 
 from tai42_skeleton.connectors.oauth.discovery import DiscoveredAuthorization
 from tai42_skeleton.connectors.providers.registry import SEED_CATEGORY_IDS

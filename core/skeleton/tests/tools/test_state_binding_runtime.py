@@ -35,14 +35,13 @@ from tai42_contract.states.errors import (
     SubjectRefusedError,
     ValueValidationError,
 )
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.states.template_jq import select_template_jq
 from tai42_kit.utils.data import JqCompileError
 
 from tai42_skeleton.states.service.subjects import _SubjectMixin
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template.errors import TemplateNotFoundError
 from tai42_skeleton.tools.state_binding import (
     apply_binding_injections,
     apply_binding_updates,
@@ -210,8 +209,8 @@ class FakeStates(_SubjectMixin):
 class FakeResourceManager:
     """The subset of the resource manager the binding render seam calls. Renders a slot's
     templated text to its jq program: an inline ``content`` is its own text; a stored ``id``
-    is looked up in ``resources`` and a MISSING id raises loudly (the store's own not-found
-    error), so the door's by-id save check fails just as it would against a real store."""
+    is looked up in ``resources`` and a MISSING id raises the manager's not-found refusal, so
+    the door's by-id save check fails just as it would against a real store."""
 
     def __init__(self, resources: dict[str, str] | None = None) -> None:
         self._resources = resources or {}
@@ -219,7 +218,9 @@ class FakeResourceManager:
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
             if text.id not in self._resources:
-                raise TemplateNotFoundError(f"template {text.id!r} not found")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return self._resources[text.id]
         assert text.content is not None
         return text.content

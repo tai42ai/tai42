@@ -49,7 +49,8 @@ from tai42_kit.interactions import CallbackUrlRefusedError, pin_callback_url
 
 from tai42_skeleton.channels.inbound_events import emit_event
 from tai42_skeleton.channels.participant_notice import send_participant_notice
-from tai42_skeleton.interactions.settings import callback_url_prefix, interactions_settings
+from tai42_skeleton.interactions.settings import callback_url_prefix
+from tai42_skeleton.settings.public_base_url import PUBLIC_BASE_URL_SETTING
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
 
     ``None`` means the check passes and the answer may be forwarded.
     A correlation's ``callback_url`` is a bearer capability THIS platform minted from
-    ``INTERACTIONS_PUBLIC_BASE_URL``. Before the handler POSTs a participant's answer to it, the
+    ``TAI_PUBLIC_BASE_URL``. Before the handler POSTs a participant's answer to it, the
     URL is pinned against the platform's callback prefix: a stored entry that is not exactly the
     minted shape must NEVER receive the answer, because that POST would ship the participant's
     reply to a non-configured (possibly attacker-chosen) host or route. FAIL-CLOSED on every
@@ -136,11 +137,12 @@ def _callback_pin_failure(callback_url: str, *, channel_id: str, interaction_id:
     pin's own refusal reason (``"host_mismatch"``, ``"path_mismatch"``, ``"malformed_url"``). The
     offending host is logged loudly, never the full URL (it embeds the callback ticket).
     """
-    prefix = callback_url_prefix(interactions_settings())
+    prefix = callback_url_prefix()
     if prefix is None:
         logger.error(
-            "inbound: INTERACTIONS_PUBLIC_BASE_URL is unset; cannot pin the callback for interaction %s "
+            "inbound: %s is unset; cannot pin the callback for interaction %s "
             "on channel %r — discarding the stored callback and treating as no correlation (fail-closed)",
+            PUBLIC_BASE_URL_SETTING,
             interaction_id,
             channel_id,
         )

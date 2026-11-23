@@ -44,6 +44,7 @@ from tai42_kit.utils.schedule_subject import SCHEDULE_CONTRACT_ARG, SCHEDULE_STA
 
 from tai42_skeleton.backup.registry import _empty_report, current_import_mode
 from tai42_skeleton.backup.webhooks_section import _export_webhooks, _import_webhooks
+from tai42_skeleton.operations.errors import translate_orphan_env_write
 from tai42_skeleton.schedules import check_schedule_definition
 from tai42_skeleton.states.backup import register_states_backup_section
 from tai42_skeleton.storage.prefix_marks import covering_prefix
@@ -68,8 +69,9 @@ def _export_manifest() -> dict[str, Any]:
 
 
 async def _import_manifest(payload: dict[str, Any]) -> BackupSectionReport:
+    # Import cycle: config.service -> results -> _broadcast -> app.instance -> app.server -> serving_core -> here.
     from tai42_skeleton.config.service import ConfigService
-    from tai42_skeleton.operations._broadcast import FleetBroadcastError, translate_orphan_env_write
+    from tai42_skeleton.operations._broadcast import FleetBroadcastError
 
     # Replaces the persisted manifest as a whole through the pipeline (validate on the
     # resolved projection, persist, reload, broadcast). Validation failure raises here

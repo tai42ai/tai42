@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import quote_plus, urlencode, urlparse
 
 import httpx
+from tai42_contract.urls import is_loopback_host
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.http import HttpxClient
 from tai42_kit.net import GuardedRequestError, UrlGuardError, guarded_request
@@ -156,16 +157,11 @@ def generate_pkce_pair() -> tuple[str, str]:
 # -- Redirect-URI allow-list -------------------------------------------------
 
 
-def _is_local_host(host: str) -> bool:
-    # Literal-only set so an attacker-registered ``evil.local`` cannot match.
-    return host in {"localhost", "127.0.0.1", "::1"}
-
-
 def validate_redirect_uri(redirect_uri: str) -> str:
     """Validate a redirect URI against the configured allow-list.
 
-    Requires an exact origin match and https:// for any non-localhost host.
-    Returns the normalised URI; raises :class:`RedirectUriNotAllowedError` on any
+    Requires an exact origin match and https:// for any host that is not loopback.
+    Returns the URI unchanged; raises :class:`RedirectUriNotAllowedError` on any
     rule violation (logged redacted to scheme+host).
     """
     if not redirect_uri:
@@ -181,13 +177,13 @@ def validate_redirect_uri(redirect_uri: str) -> str:
         raise RedirectUriNotAllowedError("redirect_uri must include scheme and host")
 
     host = parsed.hostname or ""
-    if parsed.scheme != "https" and not _is_local_host(host):
+    if parsed.scheme != "https" and not is_loopback_host(host):
         logger.warning(
-            "connectors: redirect_uri rejected (non-https for non-local host): %s://%s",
+            "connectors: redirect_uri rejected (non-https for non-loopback host): %s://%s",
             parsed.scheme,
             host,
         )
-        raise RedirectUriNotAllowedError("redirect_uri must use https:// for non-local hosts")
+        raise RedirectUriNotAllowedError("redirect_uri must use https:// for non-loopback hosts")
 
     allowlist = connector_engine_config().redirect_uri_allowlist_origins
     if not allowlist:

@@ -12,14 +12,13 @@ from __future__ import annotations
 import mimetypes
 
 import pytest
-from jinja2 import TemplateError
 from tai42_contract.storage import ObjectStat, Storage
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotTextError, TemplateRenderError
 
 import tai42_skeleton.operations.templates as templates_ops
 from tai42_skeleton.operations import BadRequestError
 from tai42_skeleton.storage import StorageRegistry
-from tai42_skeleton.template import ResourceManager, TemplateNotTextError
+from tai42_skeleton.template import ResourceManager
 
 from .._fakes.listing import keys_under
 from .._fakes.template_holders import app_held_by
@@ -82,8 +81,8 @@ class _Store(_BytesStorage):
         super().__init__({"logo.png": _PNG, "page.j2": b"Head {% include 'logo.png' %}"})
 
 
-def test_not_text_error_is_a_template_error() -> None:
-    assert issubclass(TemplateNotTextError, TemplateError)
+def test_not_text_error_is_a_render_refusal() -> None:
+    assert issubclass(TemplateNotTextError, TemplateRenderError)
 
 
 async def test_fetch_template_of_binary_object_is_not_text() -> None:

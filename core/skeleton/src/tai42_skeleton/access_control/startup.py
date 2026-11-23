@@ -49,7 +49,7 @@ async def probe_identity_provider() -> None:
     ``app.record_auth_provider`` so a later request never re-instantiates it nor reads a
     plugin module holder, validates the authorization servers each one declares (an invalid
     declaration fails the build; a declaring provider on a deployment with no
-    ``ACCESS_CONTROL_PUBLIC_BASE_URL`` logs one warning) and the display name each accounts
+    ``TAI_PUBLIC_BASE_URL`` logs one warning) and the display name each accounts
     provider declares (an invalid one fails the build), then awaits each provider's
     ``healthcheck()``. A provider whose storage needs no boot probe inherits the
     contract's default no-op; a key-minting provider probes its own record store. ANY

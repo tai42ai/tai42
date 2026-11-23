@@ -74,11 +74,12 @@ def test_undeclared_route_records_trivial_defaults() -> None:
     assert meta.reload_gated is False
     assert meta.reads_body is False
     assert meta.holds_writer_exit is False
+    assert meta.answers_leaving is False
     assert meta.error_statuses == ()
     assert meta.success_status == 200
 
 
-def _record_declaring(registry: RouteRegistry, *, holds_writer_exit: bool) -> None:
+def _record_declaring(registry: RouteRegistry, *, holds_writer_exit: bool, answers_leaving: bool = False) -> None:
     registry.record(
         path="/api/thing",
         methods=["POST"],
@@ -95,18 +96,31 @@ def _record_declaring(registry: RouteRegistry, *, holds_writer_exit: bool) -> No
             reload_gated=False,
             reads_body=True,
             holds_writer_exit=holds_writer_exit,
+            answers_leaving=answers_leaving,
             error_statuses=(400, 401),
             success_status=200,
         ),
     )
 
 
-def test_a_route_holding_the_writer_exit_records_the_leaving_503_among_its_error_statuses() -> None:
+def test_a_route_holding_the_writer_exit_records_that_it_answers_the_leaving_503() -> None:
+    # The leaving answer is its own shape, so it is recorded as its own fact, never as a plain
+    # ``503`` among the error statuses.
     registry = RouteRegistry()
     _record_declaring(registry, holds_writer_exit=True)
     (meta,) = registry.routes()
     assert meta.holds_writer_exit is True
-    assert meta.error_statuses == (400, 401, 503)
+    assert meta.answers_leaving is True
+    assert meta.error_statuses == (400, 401)
+
+
+def test_a_route_relaying_the_leaving_refusal_records_that_it_answers_it_without_holding_the_exit() -> None:
+    registry = RouteRegistry()
+    _record_declaring(registry, holds_writer_exit=False, answers_leaving=True)
+    (meta,) = registry.routes()
+    assert meta.holds_writer_exit is False
+    assert meta.answers_leaving is True
+    assert meta.error_statuses == (400, 401)
 
 
 def test_a_route_declaring_no_hold_records_no_leaving_503() -> None:
@@ -114,6 +128,7 @@ def test_a_route_declaring_no_hold_records_no_leaving_503() -> None:
     _record_declaring(registry, holds_writer_exit=False)
     (meta,) = registry.routes()
     assert meta.holds_writer_exit is False
+    assert meta.answers_leaving is False
     assert meta.error_statuses == (400, 401)
 
 

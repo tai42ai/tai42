@@ -5,11 +5,11 @@ error is never remembered. All storage is an in-memory ``Storage`` double counti
 from __future__ import annotations
 
 import pytest
+from tai42_contract.template import TemplateNotFoundError
 from tai42_kit.settings import reset_all_settings
 
 from tai42_skeleton.storage import StorageRegistry
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from .._fakes.template_holders import app_held_by
 from ._manager_fixtures import _InMemoryStorage

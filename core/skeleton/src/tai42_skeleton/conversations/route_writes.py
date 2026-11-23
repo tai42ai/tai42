@@ -17,13 +17,13 @@ from dataclasses import dataclass
 
 from tai42_contract.app import tai42_app
 from tai42_contract.conversations import ConversationRoute
+from tai42_contract.template import TemplateRenderError
 from tai42_kit.utils.data.jq_errors import JqProgramError
 from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.managers.base_conversations_manager import BaseConversationsManager
 from tai42_skeleton.conversations.target_validators import active_target_candidate_body, target_bind_refusal_lines
-from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
 from tai42_skeleton.template.references import assert_templates_stored
 from tai42_skeleton.template.stored_refs import route_template_refs
 
@@ -89,8 +89,8 @@ async def _assert_exprs_compile(route: ConversationRoute) -> None:
             continue
         try:
             program = await tai42_app.storage.resource_manager.render_templated_text(text)
-        except TEMPLATE_RENDER_ERRORS as exc:
-            raise RouteWriteRefusedError(f"{field} {template_render_refusal(text, exc)}") from exc
+        except TemplateRenderError as exc:
+            raise RouteWriteRefusedError(f"{field} {exc}") from exc
         try:
             await compile_check(program, variables=variables)
         except JqProgramError as exc:

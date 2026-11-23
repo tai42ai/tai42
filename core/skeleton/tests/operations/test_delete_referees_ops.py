@@ -24,6 +24,7 @@ from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import Manifest
 from tai42_skeleton.operations import ConflictError
 from tai42_skeleton.operations import presets as preset_ops
+from tai42_skeleton.operations.errors import OperationFailedError
 from tai42_skeleton.tools.binding.surface import remove_surface_tool
 
 from .._fakes.caller_reach import bound_caller
@@ -284,10 +285,32 @@ def test_a_raising_cascade_fails_the_delete_and_keeps_the_preset(pg) -> None:
         async with instance.app.app_context(_manifest()):
             await _create("p")
             instance.app.tools.register_delete_cascade(_cleanup_boom)
-            with pytest.raises(RuntimeError, match="cleanup store unreadable"):
+            with pytest.raises(OperationFailedError) as failed:
                 await preset_ops.delete_preset("p")
+            assert failed.value.message == (
+                "preset 'p' cannot be deleted — a delete cascade failed for 'p': cleanup store unreadable"
+            )
+            assert isinstance(failed.value.__cause__, RuntimeError)
             assert instance.app.preset_manager.is_registered("p")
             assert (await instance.app.presets.store.get_preset("p")).name == "p"
+
+    asyncio.run(run())
+
+
+def test_a_cascade_refusing_with_a_typed_error_fails_the_delete_with_that_error(pg) -> None:
+    refusal = ConflictError("the cascade's own refusal")
+
+    async def _cleanup_refusing(_name: str) -> None:
+        raise refusal
+
+    async def run() -> None:
+        async with instance.app.app_context(_manifest()):
+            await _create("p")
+            instance.app.tools.register_delete_cascade(_cleanup_refusing)
+            with pytest.raises(ConflictError) as refused:
+                await preset_ops.delete_preset("p")
+            assert refused.value is refusal
+            assert instance.app.preset_manager.is_registered("p")
 
     asyncio.run(run())
 

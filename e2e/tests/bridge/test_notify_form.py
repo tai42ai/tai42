@@ -420,7 +420,7 @@ _STORED_REFERENCE_RE = re.compile(r"/api/interactions/media/[A-Za-z0-9_-]{43}")
 @pytest.mark.needs(
     "kind:channels:whatsapp",
     "helper:whatsapp",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:router:notifications",
     "setting:seeded-access-control",
     "store:redis",

@@ -1,10 +1,10 @@
 """Unsupported inbound content replies once and emits the rejection event — every wired channel.
 
 A content a channel recognises but cannot bridge — a telegram poll, a slack file exposing neither a
-fetchable reference nor a name, a whatsapp ``errors`` notice naming the unsupported-message-type
-code (131051), a twilio inbound with an empty ``Body`` and no media (a shared location, for one) — is
-never silently dropped: the participant gets the ONE generic notice
-("This content type is not supported here.") on the vendor stub, the platform emits a single
+fetchable reference nor a name, a slack message shared with no comment, a whatsapp ``errors`` notice
+naming the unsupported-message-type code (131051), a twilio inbound with an empty ``Body`` and no
+media (a shared location, for one) — is never silently dropped: the participant gets the ONE generic
+notice ("This content type is not supported here.") on the vendor stub, the platform emits a single
 ``conversations_inbound_rejected`` event carrying ``reason == "unsupported_type"`` (observed through a
 hook fired on that topic), and no conversation turn is accepted.
 
@@ -168,6 +168,38 @@ async def test_slack_nameless_file_is_rejected_once(
         recipient=channel,
         recipient_field="channel",
         redelivery=redelivery,
+    )
+
+
+@pytest.mark.needs("kind:channels:slack", "helper:channel-fake:slack", "setting:CHANNEL_SLACK_SIGNING_SECRET")
+async def test_slack_share_with_no_comment_is_rejected_once(
+    media_bridge_stack: tuple[TaiStack, str], fake_slack: Any, uniq: Callable[[str], str]
+) -> None:
+    stack, _root = media_bridge_stack
+    channel = f"C0{uniq('slk-share').upper().replace('_', '').replace('-', '')[:8]}"
+    event_id = f"Ev{uniq('slk-share-ev')}"
+    # A message shared with no comment of its own: blank text, the shared message as an attachment.
+    attachments = [{"is_share": True, "text": "the shared message", "channel_id": "C0SHARED"}]
+
+    def _share() -> SignedInbound:
+        return fake_slack.build_inbound(
+            signing_secret=stack.config.env["CHANNEL_SLACK_SIGNING_SECRET"],
+            channel=channel,
+            thread_ts="1700000000.000100",
+            text="",
+            event_id=event_id,
+            attachments=attachments,
+        )
+
+    await _assert_rejects_once(
+        stack,
+        uniq,
+        path="/api/channels/slack/inbound",
+        inbound=_share(),
+        fake=fake_slack,
+        recipient=channel,
+        recipient_field="channel",
+        redelivery=_share(),
     )
 
 

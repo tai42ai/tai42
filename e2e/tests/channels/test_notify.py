@@ -41,7 +41,7 @@ pytestmark = pytest.mark.backendless
     "helper:channel-fake:slack",
     "helper:channel-fake:twilio",
     "setting:channel-allowed-recipients",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
 )
 async def test_notify_external_is_plain_and_stateless(channel_case: ChannelCase, uniq: Callable[[str], str]) -> None:
     case = channel_case

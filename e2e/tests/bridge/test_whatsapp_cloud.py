@@ -1404,6 +1404,20 @@ _SHAPED_REACTING_SCHEMA = {
 # ``label`` — kept in step with the probe's own constant.
 _REACTION_LABEL_PREFIX = "picked "
 
+# The tier whose pick makes the ``e2e_form_reaction`` probe clear ``label`` — kept in step with the
+# probe's own constant.
+_REACTION_CLEARING_TIER = "plain"
+
+# The reacting form with the clearing tier among its choices — its own Flow, never the cached one
+# the shaped reacting form published.
+_CLEARING_REACTING_SCHEMA = {
+    **_SHAPED_REACTING_SCHEMA,
+    "properties": {
+        **_SHAPED_REACTING_SCHEMA["properties"],
+        "tier": {"type": "string", "enum": ["gold", "silver", _REACTION_CLEARING_TIER], "title": "Tier"},
+    },
+}
+
 # This channel's word for a broken ``format: email`` in the field, and the platform's sentence
 # the screen's error line names it with.
 _EMAIL_FIELD_WORD = "Use name@example.com"
@@ -1841,6 +1855,65 @@ async def test_reacting_form_runs_its_field_reaction_over_a_bad_email_and_its_su
         "label": f"{_REACTION_LABEL_PREFIX}gold",
         "tier": "gold",
         "email": "alice@example.org",
+    }
+
+
+@pytest.mark.needs(
+    "kind:channels:whatsapp",
+    "helper:whatsapp",
+    "probe-tools",
+    "setting:seeded-access-control",
+    "store:redis",
+    "topology:replicas",
+)
+async def test_reacting_form_field_reaction_clears_a_field_it_had_set(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    question = uniq("l7-clear-react-q")
+    wa_id = _fresh_wa_id()
+    caller_key = await bridge.mint_key(user_id=uniq("l7-clear-react-key"), scopes=["e2e-all"])
+
+    async with bridge.stack.mcp(port=bridge.stack.port_a, auth=caller_key) as mcp:
+        await mcp.call_tool(
+            "e2e_reacting_form_ask",
+            {
+                "question": question,
+                "channel": "whatsapp",
+                "recipient": wa_id,
+                "schema": _CLEARING_REACTING_SCHEMA,
+                "reactions": {"field_changed": ["tier"]},
+                "expiry_seconds": 120.0,
+            },
+        )
+    send = await wait_whatsapp_send(bridge.fake_whatsapp, question)
+    flow_json, flow_token, screen_data = _sent_flow(bridge, send)
+
+    # A gold pick re-fills the label on the same screen.
+    set_typed = {"label": "", "tier": "gold", "email": ""}
+    filled = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json, screen="SCREEN_A", flow_token=flow_token, form=set_typed, data=screen_data, control="tier"
+        )
+    )
+    assert filled["screen"] == "SCREEN_A", filled
+    assert filled["data"]["label__init"] == f"{_REACTION_LABEL_PREFIX}gold"
+
+    # The clearing pick answers a ``None`` label: the screen's whole data comes back with the label
+    # control emptied and every other control as the person left it.
+    clear_typed = {"label": f"{_REACTION_LABEL_PREFIX}gold", "tier": _REACTION_CLEARING_TIER, "email": ""}
+    cleared = await bridge.whatsapp_flow_exchange(
+        whatsapp_flow_action_request(
+            flow_json, screen="SCREEN_A", flow_token=flow_token, form=clear_typed, data=filled["data"], control="tier"
+        )
+    )
+    assert cleared == {
+        "screen": "SCREEN_A",
+        "data": {
+            **filled["data"],
+            "tier__init": _REACTION_CLEARING_TIER,
+            "email__init": "",
+            "label__init": "",
+        },
     }
 
 

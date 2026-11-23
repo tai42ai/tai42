@@ -47,6 +47,7 @@ from tai42_skeleton.operations.presets.create import _apply_one_seed as _apply_o
 from tai42_skeleton.operations.presets.create import _create_preset_core as _create_preset_core
 from tai42_skeleton.operations.presets.create import apply_preset_seeds as apply_preset_seeds
 from tai42_skeleton.operations.presets.create import create_preset as create_preset
+from tai42_skeleton.operations.presets.delete import delete_preset as delete_preset
 from tai42_skeleton.operations.presets.models import PresetCreate as PresetCreate
 from tai42_skeleton.operations.presets.models import PresetRename as PresetRename
 from tai42_skeleton.operations.presets.models import PresetRollback as PresetRollback
@@ -67,7 +68,6 @@ from tai42_skeleton.operations.presets.readers import read_input_schema as read_
 from tai42_skeleton.operations.presets.readers import read_output_map as read_output_map
 from tai42_skeleton.operations.presets.readers import read_output_schema as read_output_schema
 from tai42_skeleton.operations.presets.readers import read_state_binding as read_state_binding
-from tai42_skeleton.operations.presets.rename import delete_preset as delete_preset
 from tai42_skeleton.operations.presets.rename import rename_preset as rename_preset
 from tai42_skeleton.operations.presets.validate import validate_preset as validate_preset
 from tai42_skeleton.operations.presets.versions import _save_version_core as _save_version_core

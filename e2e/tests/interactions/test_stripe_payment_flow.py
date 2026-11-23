@@ -55,7 +55,7 @@ pytestmark = [
         "setting:seeded-access-control",
         "setting:STRIPE_API_BASE",
         "setting:E2E_STRIPE_WEBHOOK_SECRET",
-        "setting:INTERACTIONS_PUBLIC_BASE_URL",
+        "setting:TAI_PUBLIC_BASE_URL",
         "setting:TAI_BRIDGE_CALLBACK_SECRET",
         "setting:stripe-tools",
     ),
