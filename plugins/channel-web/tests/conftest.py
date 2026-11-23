@@ -7,6 +7,7 @@ answer paths reach clients via ``tai42_app.clients.client_ctx``; a stub bound he
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -812,14 +813,22 @@ def _body(resp: Response) -> dict:
 
 async def _sent_body(resp: Response) -> bytes:
     """The bytes a response actually puts on the wire — the only way to read a
-    ``FileResponse``, which streams from disk rather than carrying a ``.body``."""
+    ``FileResponse``, which streams from disk rather than carrying a ``.body``.
+
+    ``receive`` behaves as a server's does for a client that stays connected: it
+    reports ``http.disconnect`` only once the whole response has been sent.
+    """
     chunks: list[bytes] = []
+    sent = asyncio.Event()
 
     async def send(message: Any) -> None:
         if message["type"] == "http.response.body":
             chunks.append(message.get("body", b""))
+            if not message.get("more_body", False):
+                sent.set()
 
     async def receive() -> Any:
+        await sent.wait()
         return {"type": "http.disconnect"}
 
     await resp({"type": "http", "method": "GET", "headers": []}, receive, send)
