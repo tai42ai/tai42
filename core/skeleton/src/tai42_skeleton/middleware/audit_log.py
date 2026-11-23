@@ -23,31 +23,36 @@ timestamp — no body, no query string, no header. The route is the only request
 text recorded, bounded by whether the request MATCHED a route. A match records the
 path TEMPLATE, every path parameter written as its ``{name}`` — so a path-borne
 capability (``/trigger/{token}``, ``/api/interactions/callback/{ticket}``) records
-the template, never the secret. Under the default Studio SPA catch-all
-(``default_routers="all"``), ``/{spa_path:path}`` matches every non-``/api``/``/mcp``
-GET and part-matches every other such method, so a near-miss on a non-API path
-records ``/{spa_path}`` with its tail swallowed by the parameter. A request NO route
-matched — an unknown ``/api``/``/mcp`` path (the catch-all holds those out), no
-catch-all (``default_routers`` ``"api"``/``"none"``), or a request the body cap
-refuses above the router — has no template: it records the bare ``<unmatched>``
-constant, no path text at all.
+the template, never the secret — under the root path a host mounting this app
+already consumed (``/x/health`` for ``/health`` served under ``Mount("/x")``).
+Under the default Studio SPA catch-all (``default_routers="all"``),
+``/{spa_path:path}`` matches every non-``/api``/``/mcp`` GET and part-matches every
+other such method, so a near-miss on a non-API path records ``/{spa_path}`` with
+its tail swallowed by the parameter. A request NO route matched — an unknown
+``/api``/``/mcp`` path (the catch-all holds those out), no catch-all
+(``default_routers`` ``"api"``/``"none"``), or a request the body cap refuses above
+the router — has no template: it records the bare ``<unmatched>`` constant, no path
+text at all.
+
+The match is read from the route OBJECT the router records on the scope
+(``scope["route"]``, written by Starlette's router on every full or partial match
+and by FastAPI's routes); its ``path_format`` is the template.
 
 A request handed to a MOUNTED app (the sub-MCP router under ``/app``) is the third
 outcome: the mount matched only its own PREFIX, and what the mounted app did with
-the rest is invisible from here — routing inside it writes the same scope marks a
-route match writes, with nothing recording which happened last. So the prefix
-(templated) is the whole of what a crossed mount may state: the line reads
-``/app/<unmatched>``, and the tail is never written even when the mounted app
-served it. Exception: a mounted app that records the matched route OBJECT
-(FastAPI) states its own template — otherwise a mounted app's own routing trail
-belongs to that app: the sub-MCP router (``/app``) DOES register this middleware
-for itself, so a sub-MCP request records TWO lines — this base app's
-``/app/<unmatched>`` and the sub-app's own inner route. The mount is
-recognised only by the marks Starlette's ``Mount`` writes (grown ``root_path``,
-the ``app_root_path`` stamped on first match), which cannot see a ``Host`` route
-(marks no path) or a ``Mount("/")`` inside an app an outer mount already stamped —
-both read as a route match instead. Neither is reachable through this package's
-route surface.
+the rest belongs to that app. So the prefix (templated) is the whole of what a
+crossed mount may state: the line reads ``/app/<unmatched>``, and the tail is never
+written even when the mounted app served it. Exception: a FastAPI route states
+its own template (its ``path_format``) wherever it was routed from, mounted app
+included, without a root path in front. The sub-MCP router (``/app``)
+registers this middleware for itself, so a sub-MCP request records TWO lines —
+this base app's ``/app/<unmatched>`` and the sub-app's own line, whose route carries
+the sub-app's root path in front (``/app/<slug>/...``). A crossed
+mount is recognised by a ``Mount`` as the recorded route and by the marks
+Starlette's ``Mount`` writes (grown ``root_path``, the ``app_root_path`` stamped on
+first match), which cannot see a ``Mount("/")`` whose mounted router matched inside
+an app an outer mount already stamped — that reads as the inner route's match.
+It is not reachable through this package's route surface.
 
 A failure inside the emit is caught and re-reported as a loud ``audit_log:`` ERROR
 line (distinct from ``audit:``, so a failure can never read as a trail entry)
@@ -64,6 +69,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import NamedTuple
 
+from fastapi.routing import APIRoute
+from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from tai42_contract.access_control.context import get_current_user_id
 
@@ -100,14 +107,12 @@ _UNRESOLVED_ROUTE = "<unresolved>"
 class _MatchMarks(NamedTuple):
     """Routing marks captured on a scope at one moment.
 
-    The matched route (FastAPI), the matched endpoint (Starlette), and the two marks only a
-    ``Mount`` writes — ``root_path`` (grown by the consumed prefix) and
-    ``app_root_path`` (stamped on first mount match; the only trace of a mount
-    consuming an EMPTY prefix).
+    The matched route object, and the two marks only a ``Mount`` writes —
+    ``root_path`` (grown by the consumed prefix) and ``app_root_path`` (stamped on
+    first mount match; the only trace of a mount consuming an EMPTY prefix).
     """
 
     route: object
-    endpoint: object
     root_path: str
     app_root_path: object
 
@@ -115,7 +120,6 @@ class _MatchMarks(NamedTuple):
 def _match_marks(scope: Scope) -> _MatchMarks:
     return _MatchMarks(
         scope.get("route"),
-        scope.get("endpoint"),
         scope.get("root_path", ""),
         scope.get("app_root_path", _ABSENT),
     )
@@ -124,13 +128,17 @@ def _match_marks(scope: Scope) -> _MatchMarks:
 def _crossed_a_mount(entered: _MatchMarks, matched: _MatchMarks) -> bool:
     """Whether routing handed the request to a MOUNTED app while the inner app ran.
 
-    ``root_path``/``app_root_path`` are used rather than the endpoint mark: a
-    ``Route`` may declare an ASGI app as its endpoint (FastMCP's ``/mcp``), so what
-    the endpoint mark holds says nothing about mount vs. route. An ASGI middleware
-    that rewrites ``root_path`` without any routing reads as a crossed mount too —
-    the safe way to be wrong.
+    The recorded route is a ``Mount`` when the mounted app records no route of its
+    own; a mounted router that matched records its inner route instead, so the
+    ``root_path``/``app_root_path`` marks are read too. An ASGI middleware that
+    rewrites ``root_path`` without any routing reads as a crossed mount — the safe
+    way to be wrong.
     """
-    return entered.root_path != matched.root_path or entered.app_root_path != matched.app_root_path
+    return (
+        isinstance(matched.route, Mount)
+        or entered.root_path != matched.root_path
+        or entered.app_root_path != matched.app_root_path
+    )
 
 
 def _templated_path(path: str, path_params: Mapping[str, object]) -> str:
@@ -247,37 +255,34 @@ class AuditLogMiddleware:
         """The MATCHED route's path TEMPLATE, or ``<unmatched>``.
 
         The module docstring has the three outcomes and what each may state.
-        Read AFTER the inner app runs: a mark is read as a CHANGE against
-        ``entered``, never mere presence — a host mounting this app may
-        pre-populate ``endpoint`` before entry.
+        Read AFTER the inner app runs: the route mark is read as a CHANGE against
+        ``entered``, never mere presence — a host mounting this app records its own
+        ``Mount`` before entry.
 
-        Check order: a matched route OBJECT wins outright (also through a mount,
-        since that mark is the same proof wherever routed from); then a crossed
-        mount (:func:`_crossed_a_mount`) ends templating at the mount prefix; then a
-        Starlette ``endpoint`` change rebuilds the template via
-        :func:`_templated_path` (a parameterless route is already its own
-        template); otherwise ``<unmatched>``.
+        Check order: no new route recorded is ``<unmatched>``; a FastAPI route states
+        its own template wherever it was routed from; a crossed mount
+        (:func:`_crossed_a_mount`) ends templating at the mount prefix; otherwise the
+        route matched in this app and its template follows the host's root path.
 
-        Rebuilding groups every caller of a ``{param}`` route under one key, with
-        one wrinkle: two parameters given the SAME value collapse onto the first
-        parameter's name (``/{a}/{b}`` reached with ``x``/``x`` reads
-        ``/{a}/{a}``), so one route can appear under more than one key —
-        over-replacing, never writing the value out.
+        The root path is concrete request text, so its parameter values are
+        rewritten to ``{name}`` by :func:`_templated_path`, with one wrinkle: two
+        mount parameters given the SAME value collapse onto the first parameter's
+        name, over-replacing, never writing the value out.
         """
         matched = _match_marks(scope)
-        if matched.route is not entered.route:
-            template = getattr(matched.route, "path", None)
-            if isinstance(template, str):
-                return template
-        path_params = scope.get("path_params") or {}
+        route = matched.route
+        if route is entered.route:
+            return UNMATCHED_ROUTE
+        if isinstance(route, APIRoute):
+            return route.path_format
+        # ``rstrip``: a root path declared with a trailing slash must not double
+        # the separator this joins with.
+        prefix = _templated_path(matched.root_path, scope.get("path_params") or {}).rstrip("/")
         if _crossed_a_mount(entered, matched):
-            # ``rstrip``: a root path declared with a trailing slash must not double
-            # the separator this joins with.
-            prefix = _templated_path(matched.root_path, path_params).rstrip("/")
             return f"{prefix}/{UNMATCHED_ROUTE}" if prefix else UNMATCHED_ROUTE
-        if matched.endpoint is not entered.endpoint:
-            return _templated_path(scope["path"], path_params)
-        return UNMATCHED_ROUTE
+        if not isinstance(route, Route):
+            raise TypeError(f"audit_log: no path template on the recorded route type {type(route).__name__}")
+        return prefix + route.path_format
 
     def _emit(self, scope: Scope, entered: _MatchMarks, status: int | None, duration_ms: int, ts: str) -> None:
         """Write the accept line without breaking the request on failure (module docstring has the failure contract).
