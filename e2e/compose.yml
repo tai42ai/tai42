@@ -101,8 +101,8 @@ services:
   # ---- storage profile: MinIO for the s3 storage axis ------------------
   # The s3 storage-axis leg's object store. Its OWN service (NOT the
   # monitoring-profile `langfuse-minio`, which carries a langfuse-specific
-  # entrypoint that pre-creates the `langfuse` bucket). The plain `minio server
-  # /data` command is set here because a GitHub Actions `services:` block cannot
+  # entrypoint that pre-creates the `langfuse` bucket). The `minio server`
+  # command is set here because a GitHub Actions `services:` block cannot
   # set a container command, so this leg brings MinIO up via the compose path. The
   # axis bucket is created in fixture setup through the independent client, not
   # here. Credentials + port are env-overridable and match the s3 variant's
@@ -113,7 +113,9 @@ services:
     # entrypoint and the bundled `mc` client the healthcheck below uses.
     image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
     profiles: ["storage"]
-    command: server /data
+    # A fixed console port: left unset, minio picks a free port, releases it and
+    # binds it later, and its own outbound connections can take it in between.
+    command: server --console-address ":9001" /data
     ports:
       - "127.0.0.1:${TAI_E2E_S3_PORT:-9002}:9000"
     environment:
@@ -328,7 +330,9 @@ services:
     # LANGFUSE_S3_EVENT_UPLOAD_BUCKET (`langfuse`) never exists, so ingestion
     # cannot persist events and no traces are ever recorded — a silent no-op.
     entrypoint: sh
-    command: -c 'mkdir -p /data/langfuse && minio server /data'
+    # A fixed console port, as in that compose: left unset, minio picks a free port,
+    # releases it and binds it later, and its own outbound connections can take it.
+    command: -c 'mkdir -p /data/langfuse && minio server --console-address ":9001" /data'
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: miniosecret
