@@ -28,15 +28,15 @@ dependencies = [
     # own ranges predate the current fleet, so the published harness stays resolvable
     # even where a member floor still admits an older patch.
     # The workspace sources in [tool.uv.sources] float them at their checkouts.
-    "tai42-contract>=30.0,<31",
+    "tai42-contract>=31.0,<32",
     # The hosted LLM providers' extras: the real ``llm`` leg runs against whichever one
     # REAL_E2E_LLM_PROVIDER selects, in this process and in the stack it boots.
-    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=21.0,<22",
-    "tai42-skeleton[toolbox,files]>=40.0,<41",
+    "tai42-kit[llm,anthropic,google,mistral,xai,jq,uvicorn,redis,postgres,curl,monitoring]>=22.0,<23",
+    "tai42-skeleton[toolbox,files]>=41.0,<42",
     "tai42-toolbox[http,prometheus,chain,embeddings,proxy,classifier]>=6.1,<7",
     # The Stripe payment tools plugin (split out of toolbox); its curl backing
     # dependency for the REST calls is unconditional.
-    "tai42-tools-stripe>=4.0,<5",
+    "tai42-tools-stripe>=5.0,<6",
     "tai42-agents>=16.0,<17",
     # The sandbox provider plugins the sandbox-axis stacks boot: the Docker-backed
     # provider and the in-process local provider. Workspace siblings, floated at
@@ -61,11 +61,11 @@ dependencies = [
     "tai42-webhook-verifier-github>=2.0,<3",
     "tai42-webhook-verifier-stripe>=2.0,<3",
     # The channel plugins that deliver ask questions over a chat transport.
-    "tai42-channel-telegram>=10.0,<11",
-    "tai42-channel-slack>=11.0,<12",
+    "tai42-channel-telegram>=11.0,<12",
+    "tai42-channel-slack>=12.0,<13",
     "tai42-channel-twilio>=10.0,<11",
-    "tai42-channel-whatsapp>=17.0,<18",
-    "tai42-channel-web>=15.0,<16",
+    "tai42-channel-whatsapp>=18.0,<19",
+    "tai42-channel-web>=16.0,<17",
     # Loaded only by the monitoring stack's manifest.
     "tai42-monitoring-langfuse>=8.0,<9",
 
