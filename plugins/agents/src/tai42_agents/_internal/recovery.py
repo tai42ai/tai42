@@ -1,11 +1,17 @@
 """Shared tool-error recovery for every agent graph.
 
-Three generic, platform-neutral mechanisms every agent wires in:
+Four generic, platform-neutral mechanisms every agent wires in:
 
 * :class:`ToolErrorToMessageMiddleware` — a langchain middleware that turns a tool-logic
   failure into a model-visible error ``ToolMessage`` so the loop continues (every other
-  exception stays a loud abort), and, after each model turn, answers the turn's invalid
-  tool calls (arguments that did not parse) the same way.
+  exception stays a loud abort), keeps each model turn free of invalid tool calls that
+  cannot be answered, and, after each model turn, answers the turn's other invalid tool
+  calls (arguments that did not parse) the same way.
+* :func:`_without_unanswerable_calls` — the one helper that drops from a model turn each
+  invalid tool call that has no id or no name, logging it. No tool result can answer such
+  a call, so the turn that is kept and sent back to the provider never carries it. The
+  middleware's model-turn wrapper, the retrieval graph's agent node and the structured
+  re-prompt feedback all use it.
 * :func:`_invalid_tool_call_answers` — the one helper that answers a model turn's invalid
   tool calls. A provider sends them back as tool calls on the next request, and a tool
   call with no tool result is rejected, so each one with an id and a name gets an error
@@ -24,6 +30,7 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Annotated, Any, NotRequired
 
 from langchain.agents.middleware import AgentMiddleware, AgentState, ToolCallRequest, hook_config
@@ -46,35 +53,54 @@ _INTERRUPTED_TOOL_RESULT = "the run was interrupted before this tool produced a 
 _UNPARSED_ARGUMENTS = "the tool call arguments did not parse"
 
 
-def _is_answerable(call: InvalidToolCall) -> bool:
-    """Whether an invalid tool call can be answered: a tool result needs the call's id and name.
+def _answer_ref(call: InvalidToolCall) -> tuple[str, str] | None:
+    """The ``(id, name)`` a tool result to an invalid tool call needs, or ``None`` when it lacks either.
 
     An empty id or name counts as none. An Anthropic request drops an invalid call that has
     no name, so an answer to it would be a tool result with no tool call; an OpenAI-compatible
     request sends it with no function name, which the provider rejects whatever follows it.
     """
-    return bool(call["id"]) and bool(call["name"])
+    call_id, name = call["id"], call["name"]
+    return (call_id, name) if call_id and name else None
 
 
-def _answerable_invalid_calls(message: AIMessage) -> list[tuple[str, str, str]]:
-    """The ``(id, name, parse error)`` of each invalid tool call of ``message`` that can be answered.
+def _is_answerable(call: InvalidToolCall) -> bool:
+    """Whether an invalid tool call can be answered (:func:`_answer_ref`)."""
+    return _answer_ref(call) is not None
 
-    Each other invalid call is logged as one that cannot be answered.
+
+def _without_unanswerable_calls(message: AIMessage) -> AIMessage:
+    """``message`` without the invalid tool calls that cannot be answered, each logged.
+
+    A call with no id or no name (:func:`_is_answerable`) can never be paired with a tool
+    result, and the agent loop answers every invalid call left on a kept turn by its id, so
+    such a call is dropped from the turn before the turn is kept or sent back. ``message``
+    itself is returned when every invalid call can be answered.
     """
-    answerable: list[tuple[str, str, str]] = []
-    for call in message.invalid_tool_calls:
+    unanswerable = [call for call in message.invalid_tool_calls if not _is_answerable(call)]
+    if not unanswerable:
+        return message
+    for call in unanswerable:
         call_id, name, error = call["id"], call["name"], call["error"] or _UNPARSED_ARGUMENTS
         if not call_id:
             logger.warning(
                 "the model returned a call to tool %r with no id whose arguments did not parse: %s", name, error
             )
-        elif not name:
+        else:
             logger.warning(
                 "the model returned a call %s with no tool name whose arguments did not parse: %s", call_id, error
             )
-        else:
-            answerable.append((call_id, name, error))
-    return answerable
+    kept = [call for call in message.invalid_tool_calls if _is_answerable(call)]
+    return message.model_copy(update={"invalid_tool_calls": kept})
+
+
+def _answerable_invalid_calls(message: AIMessage) -> list[tuple[str, str, str]]:
+    """The ``(id, name, parse error)`` of each invalid tool call of ``message`` that can be answered."""
+    return [
+        (*ref, call["error"] or _UNPARSED_ARGUMENTS)
+        for call in message.invalid_tool_calls
+        if (ref := _answer_ref(call)) is not None
+    ]
 
 
 def _invalid_tool_call_answers(message: AIMessage, answered: frozenset[str] = frozenset()) -> list[ToolMessage]:
@@ -83,7 +109,7 @@ def _invalid_tool_call_answers(message: AIMessage, answered: frozenset[str] = fr
     An invalid tool call is one whose arguments did not parse. Each answer carries the
     call's parse error and is logged like a tool error. A call whose id is in
     ``answered`` already has its answer and is skipped. A call with no id or no name
-    cannot be answered: it is logged as such.
+    cannot be answered; :func:`_without_unanswerable_calls` drops and logs it.
     """
     answers: list[ToolMessage] = []
     for call_id, name, error in _answerable_invalid_calls(message):
@@ -117,9 +143,17 @@ class _ToolErrorState(AgentState[Any]):
 
 
 def _record_turn(response: ModelResponse) -> ExtendedModelResponse:
-    """The model turn's response, with the record of whether it produced the structured answer."""
+    """The model turn's response, with the record of whether it produced the structured answer.
+
+    Each ``AIMessage`` of the response goes through :func:`_without_unanswerable_calls`,
+    so the turn the agent state keeps carries no invalid call that cannot be answered.
+    """
+    kept = replace(
+        response,
+        result=[_without_unanswerable_calls(m) if isinstance(m, AIMessage) else m for m in response.result],
+    )
     return ExtendedModelResponse(
-        model_response=response,
+        model_response=kept,
         command=Command(update={_TURN_ANSWERED_STRUCTURED: response.structured_response is not None}),
     )
 
@@ -152,13 +186,14 @@ class ToolErrorToMessageMiddleware(AgentMiddleware):
     invocation is caught; every other exception propagates unchanged so an
     infrastructure failure stays a loud abort.
 
-    Its ``after_model`` hook answers each invalid tool call of the model turn through
-    :func:`_invalid_tool_call_answers`, and sends a turn whose calls were all invalid
-    back to the model unless that turn produced the structured answer, which its
-    ``wrap_model_call`` records per turn. The hook runs after the model node, so it sees
-    only the turn that left it: a structured-output rail (a ``wrap_model_call`` middleware
-    inside this one) judges and answers a broken structured call in-node first, and that
-    call never reaches this hook.
+    Its ``wrap_model_call`` drops from the model turn each invalid tool call that cannot be
+    answered (:func:`_without_unanswerable_calls`) and records whether the turn produced the
+    structured answer. Its ``after_model`` hook answers each remaining invalid tool call of
+    the turn through :func:`_invalid_tool_call_answers`, and sends a turn whose calls were
+    all invalid back to the model unless that turn produced the structured answer. The
+    hook runs after the model node, so it sees only the turn that left it: a
+    structured-output rail (a ``wrap_model_call`` middleware inside this one) judges and
+    answers a broken structured call in-node first, and that call never reaches this hook.
     """
 
     state_schema = _ToolErrorState
@@ -168,7 +203,7 @@ class ToolErrorToMessageMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ExtendedModelResponse:
-        """Run the model and record whether its turn produced the structured answer."""
+        """Run the model, drop its turn's unanswerable calls, and record whether it produced the structured answer."""
         return _record_turn(handler(request))
 
     async def awrap_model_call(
@@ -176,7 +211,7 @@ class ToolErrorToMessageMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ExtendedModelResponse:
-        """Run the model and record whether its turn produced the structured answer."""
+        """Run the model, drop its turn's unanswerable calls, and record whether it produced the structured answer."""
         return _record_turn(await handler(request))
 
     @hook_config(can_jump_to=["model"])
