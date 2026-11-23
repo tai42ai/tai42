@@ -1,12 +1,10 @@
 import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
 import { describe, expect, it } from 'vitest';
 
+import { isRecord } from '@/guards';
 import {
-  changedTopLevelKeys,
   errorsForFields,
-  firstPageWithError,
   initialFormValue,
-  isPlainObject,
   propertyOrder,
   resolvePages,
   singleFieldSchema,
@@ -20,15 +18,6 @@ const page = (fields: string[]): FormPage => ({
   display: [],
   kind: 'input',
   buttonLabel: null,
-});
-
-describe('isPlainObject', () => {
-  it('accepts a plain object and rejects arrays, null, and primitives', () => {
-    expect(isPlainObject({})).toBe(true);
-    expect(isPlainObject([])).toBe(false);
-    expect(isPlainObject(null)).toBe(false);
-    expect(isPlainObject('x')).toBe(false);
-  });
 });
 
 describe('propertyOrder', () => {
@@ -100,15 +89,7 @@ describe('initialFormValue', () => {
       type: 'object',
       properties: { name: { type: 'string' } },
     } as unknown as JsonSchema;
-    expect(isPlainObject(initialFormValue(schema, null))).toBe(true);
-  });
-});
-
-describe('changedTopLevelKeys', () => {
-  it('reports the keys whose value differs, treating a non-object as empty', () => {
-    expect(changedTopLevelKeys({ a: 1, b: 2 }, { a: 1, b: 3 })).toEqual(['b']);
-    expect(changedTopLevelKeys(null, { a: 1 })).toEqual(['a']);
-    expect(changedTopLevelKeys({ a: 1 }, 'x')).toEqual(['a']);
+    expect(isRecord(initialFormValue(schema, null))).toBe(true);
   });
 });
 
@@ -159,20 +140,6 @@ describe('errorsForFields', () => {
       'addr.city': 'required',
       'items[0]': 'bad',
     });
-  });
-});
-
-describe('firstPageWithError', () => {
-  it('returns the index of the first page carrying an errored field (nested paths included)', () => {
-    const pages = [page(['name']), page(['addr'])];
-    const errors = { 'addr.city': 'required' } as unknown as SchemaFormErrors;
-    expect(firstPageWithError(pages, errors)).toBe(1);
-  });
-
-  it('returns -1 when no page carries an errored field', () => {
-    const pages = [page(['name'])];
-    const errors = { phone: 'required' } as unknown as SchemaFormErrors;
-    expect(firstPageWithError(pages, errors)).toBe(-1);
   });
 });
 

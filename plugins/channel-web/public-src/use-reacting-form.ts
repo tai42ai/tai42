@@ -4,23 +4,26 @@
  * `reactions` and carries an `interactionId`) rounds-trips each declared event to this
  * plugin's own reaction door and applies the returned update; only the latest response is
  * applied, and a failed round-trip surfaces LOUDLY and holds the form open, never a stale
- * value. A static form behaves exactly as before. The presentational `FormSurface` reads
+ * value. A static form fires no reaction and submits its value as entered. A submitted
+ * reaction's update is part of the answer: it is folded into the value as every other
+ * reaction's is (choices its lists no longer offer dropped, its values laid over) and the
+ * result is validated again before it is posted; a page-advance reaction's folded page is
+ * checked again the same way before the step turns. The presentational `FormSurface` reads
  * what this returns; it owns no state of its own.
  */
 import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
-import { validateAgainstSchema } from '@tai42/studio-sdk';
+import { changedTopLevelKeys, firstPageWithError, withFoldedUpdate } from '@tai42/studio-sdk';
 import type { RefObject } from 'react';
 import { useRef, useState } from 'react';
 
 import { ChatApiError, reactToForm } from '@/api';
+import { isRecord } from '@/guards';
 import type { SdkFieldWording } from '@/schema-form-helpers';
 import {
-  changedTopLevelKeys,
+  answerErrors,
   errorsForFields,
-  firstPageWithError,
   imageSlotsOf,
   initialFormValue,
-  isPlainObject,
   resolvePages,
   toSdkFieldWording,
   useStepFocus,
@@ -114,11 +117,8 @@ function useFormState(schema: JsonSchema, formData: FormPrefill | null): FormSta
   const [slots, setSlots] = useState<Record<string, DisplayText>>({});
   const [imageSources, setImageSources] = useState<ImageSources>(() => new Map());
   const applyUpdate = (update: FormUpdate): void => {
-    if (Object.keys(update.values).length > 0) {
-      setValue((current: unknown) => ({
-        ...(isPlainObject(current) ? current : {}),
-        ...update.values,
-      }));
+    if (Object.keys(update.options).length > 0 || Object.keys(update.values).length > 0) {
+      setValue((current: unknown) => withFoldedUpdate(schema, current, update));
     }
     if (Object.keys(update.options).length > 0)
       setOptions((cur) => ({ ...cur, ...update.options }));
@@ -199,6 +199,7 @@ function useReactionRunner(
 }
 
 interface HandlerContext {
+  /** The published schema; each validation stamps the current choice lists onto it. */
   readonly schema: JsonSchema;
   readonly fieldWording: SdkFieldWording;
   readonly reactions: FormReactions | null;
@@ -212,30 +213,47 @@ interface HandlerContext {
   readonly onSubmit: (answer: unknown) => void;
 }
 
+interface AnswerChecks {
+  /** Check the shown page's fields of `answer` with `options` as their choices; show what
+   * fails and report whether the page passes. */
+  readonly pagePasses: (answer: unknown, options: OptionMap) => boolean;
+  /** Check the whole answer with `options` as its fields' choices; show what fails (turning a
+   * stepped form to the first page carrying one) and report whether it passes. */
+  readonly wholePasses: (answer: unknown, options: OptionMap) => boolean;
+}
+
+/** The checks an answer meets before the form moves on, each showing the errors it finds. */
+function makeAnswerChecks(ctx: HandlerContext): AnswerChecks {
+  const { schema, fieldWording, page, stepped, resolvedPages, st, setPageIndex } = ctx;
+  const pagePasses = (answer: unknown, options: OptionMap): boolean => {
+    const found = errorsForFields(answerErrors(schema, options, answer, fieldWording), page.fields);
+    st.setErrors(found);
+    return Object.keys(found).length === 0;
+  };
+  const wholePasses = (answer: unknown, options: OptionMap): boolean => {
+    const found = answerErrors(schema, options, answer, fieldWording);
+    st.setErrors(found);
+    if (Object.keys(found).length === 0) return true;
+    const target = stepped ? firstPageWithError(resolvedPages, found) : -1;
+    if (target !== -1) setPageIndex(target);
+    return false;
+  };
+  return { pagePasses, wholePasses };
+}
+
 /** The change / advance / submit / back handlers for one open form. Each gating path (a
  * declared field-change / page-advance / submit reaction) runs the reaction first and acts
  * only once it accepts; a failed or refusing reaction holds the form where it is. */
 function makeHandlers(
   ctx: HandlerContext,
 ): Pick<ReactingForm, 'onChange' | 'onBack' | 'onNext' | 'onSubmit'> {
-  const {
-    schema,
-    fieldWording,
-    reactions,
-    page,
-    stepped,
-    resolvedPages,
-    st,
-    runner,
-    setPageIndex,
-    armStepMove,
-    onSubmit,
-  } = ctx;
-  const gateThen = (event: ReactionEvent, proceed: () => void): void => {
+  const { schema, reactions, page, st, runner, setPageIndex, armStepMove, onSubmit } = ctx;
+  const { pagePasses, wholePasses } = makeAnswerChecks(ctx);
+  const gateThen = (event: ReactionEvent, proceed: (update: FormUpdate) => void): void => {
     void (async () => {
-      const update = await runner.fireReaction(event, isPlainObject(st.value) ? st.value : {});
+      const update = await runner.fireReaction(event, isRecord(st.value) ? st.value : {});
       if (update === null || Object.keys(update.errors).length > 0) return;
-      proceed();
+      proceed(update);
     })();
   };
   const advance = (): void => {
@@ -251,33 +269,33 @@ function makeHandlers(
     if (triggered !== undefined) {
       void runner.fireReaction(
         { kind: 'field_changed', field: triggered },
-        isPlainObject(next) ? next : {},
+        isRecord(next) ? next : {},
       );
     }
   };
   const onNext = (): void => {
-    const found = errorsForFields(
-      validateAgainstSchema(schema, st.value, { fieldWording }),
-      page.fields,
-    );
-    st.setErrors(found);
-    if (Object.keys(found).length > 0) return;
+    if (!pagePasses(st.value, st.options)) return;
     if (reactions?.pageAdvanced.includes(page.title)) {
-      gateThen({ kind: 'page_advanced', page: page.title }, advance);
+      // The page the reaction's folded update leaves is checked again before the step turns:
+      // a reaction that withdraws a required pick holds the step on its sentence.
+      gateThen({ kind: 'page_advanced', page: page.title }, (update) => {
+        const answer = withFoldedUpdate(schema, st.value, update);
+        if (pagePasses(answer, { ...st.options, ...update.options })) advance();
+      });
       return;
     }
     advance();
   };
   const onSubmitForm = (): void => {
-    const found = validateAgainstSchema(schema, st.value, { fieldWording });
-    st.setErrors(found);
-    if (Object.keys(found).length > 0) {
-      const target = stepped ? firstPageWithError(resolvedPages, found) : -1;
-      if (target !== -1) setPageIndex(target);
-      return;
-    }
+    if (!wholePasses(st.value, st.options)) return;
     if (reactions?.submitted) {
-      gateThen({ kind: 'submitted' }, () => onSubmit(st.value));
+      // The answer is the reaction's update folded into the vetted one, as the form state
+      // folds it, and checked again against the choices it returned: a reaction that clears
+      // a required field holds the form open.
+      gateThen({ kind: 'submitted' }, (update) => {
+        const answer = withFoldedUpdate(schema, st.value, update);
+        if (wholePasses(answer, { ...st.options, ...update.options })) onSubmit(answer);
+      });
       return;
     }
     onSubmit(st.value);

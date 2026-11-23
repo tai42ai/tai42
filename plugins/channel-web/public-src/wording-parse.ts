@@ -8,7 +8,7 @@
  * `status.countdown.seconds_left` missing its `{seconds}` token taints the whole frame,
  * so a caller's word is never rendered blank or half-read.
  */
-import { isRecord } from '@/frame-parse';
+import { isRecord } from '@/guards';
 import type {
   AnswerWording,
   ChoiceWording,

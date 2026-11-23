@@ -8,14 +8,17 @@
  *
  * The value/step state and the change / advance / submit handlers (including the reaction
  * round-trip of a reacting form) live in `useReactingForm`; this module is the
- * presentation: the per-field controls and the step surface they render on.
+ * presentation: the per-field controls and the step surface they render on; a field
+ * with a per-send choice list draws through `OptionField`.
  */
 import type { JsonSchema, SchemaFormErrors } from '@tai42/studio-sdk';
 import { Badge, Button, isFieldVisible, SchemaForm, Spinner } from '@tai42/studio-sdk';
 import type { ReactElement, RefObject } from 'react';
 
 import { DisplayBlocks, ReviewReadback } from '@/form-display';
-import { isPlainObject, singleFieldSchema, toSdkFieldWording } from '@/schema-form-helpers';
+import { OptionField } from '@/form-option-field';
+import { isRecord } from '@/guards';
+import { singleFieldSchema, toSdkFieldWording } from '@/schema-form-helpers';
 import type { DisplayText, FieldWording, FormOptionData, FormPage } from '@/transcript-model';
 import type { ReactingFormInput, ReactionError } from '@/use-reacting-form';
 import { useReactingForm } from '@/use-reacting-form';
@@ -32,76 +35,8 @@ export function MalformedNotice({ message }: { readonly message: string }): Reac
   );
 }
 
-/** The text shown for one option: its label (falling back to the value) and, when it
- * carries a second line, that line folded on after an em dash — a native `<option>` has
- * no slot for a second line, so the content rides the option text rather than being lost. */
-function optionText(option: FormOptionData): string {
-  const label = option.label ?? option.value;
-  const description =
-    typeof option.description === 'string' && option.description.trim() !== ''
-      ? option.description
-      : null;
-  return description === null ? label : `${label} — ${description}`;
-}
-
-/** A per-send option field: a native `<select>` whose options show their label
- * (falling back to the value) and post their value. Native so it is keyboard
- * reachable and themed by the widget's tokens; a leading placeholder keeps it
- * controlled and unselected until the visitor (or a prefill) picks a value. A field
- * `hint` (the schema property's second line) draws under the label, matching the SDK's
- * own field hint; an option's second line folds onto its option text. */
-function OptionSelect({
-  id,
-  label,
-  placeholder,
-  hint,
-  options,
-  value,
-  error,
-  onChange,
-}: {
-  readonly id: string;
-  readonly label: string;
-  readonly placeholder: string;
-  readonly hint: string | undefined;
-  readonly options: readonly FormOptionData[];
-  readonly value: unknown;
-  readonly error: string | undefined;
-  readonly onChange: (value: string) => void;
-}): ReactElement {
-  const selected = typeof value === 'string' ? value : '';
-  return (
-    <div className="tcw-form-field">
-      <label className="tcw-form-field-label" htmlFor={id}>
-        {label}
-      </label>
-      {hint !== undefined ? <p className="tai-field-hint">{hint}</p> : null}
-      <select
-        id={id}
-        className="tcw-select"
-        value={selected}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        <option value="" disabled>
-          {placeholder}
-        </option>
-        {options.map((option) => (
-          <option key={option.value} value={option.value}>
-            {optionText(option)}
-          </option>
-        ))}
-      </select>
-      {error !== undefined ? (
-        <span className="tcw-form-field-error" role="alert">
-          {error}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
 /** One field of the current step: nothing when a `visibleWhen` predicate hides it, a
- * per-send option select when a choice list is supplied, a loud notice for a field the
+ * per-send option control when a choice list is supplied, a loud notice for a field the
  * schema does not declare, else the schema's own single-field control (which the SDK
  * renders as multi-select / radio / native date / conditional as the property declares). */
 function FormField({
@@ -125,29 +60,22 @@ function FormField({
   readonly fieldPlaceholder: string;
   readonly onChange: (value: unknown) => void;
 }): ReactElement | null {
-  const prop = isPlainObject(schema.properties) ? schema.properties[field] : undefined;
+  const prop = isRecord(schema.properties) ? schema.properties[field] : undefined;
   // A field hidden by its `visibleWhen` predicate (evaluated against the whole value) is
   // not shown; the answer facet drops its value from the answer the consumer receives.
-  if (prop !== undefined && !isFieldVisible(prop, isPlainObject(value) ? value : {})) return null;
+  if (prop !== undefined && !isFieldVisible(prop, isRecord(value) ? value : {})) return null;
   const choices = options[field];
   if (choices !== undefined) {
-    const label = typeof prop?.title === 'string' ? prop.title : field;
-    const hint =
-      typeof prop?.description === 'string' && prop.description.trim() !== ''
-        ? prop.description
-        : undefined;
     return (
-      <OptionSelect
-        id={`${idPrefix}-${field}`}
-        label={label}
-        placeholder={fieldWording[field]?.choiceLabel ?? fieldPlaceholder}
-        hint={hint}
-        options={choices}
-        value={isPlainObject(value) ? value[field] : undefined}
+      <OptionField
+        field={field}
+        prop={prop}
+        choices={choices}
+        value={value}
         error={errors[field]}
-        onChange={(next) =>
-          onChange(isPlainObject(value) ? { ...value, [field]: next } : { [field]: next })
-        }
+        id={`${idPrefix}-${field}`}
+        placeholder={fieldWording[field]?.choiceLabel ?? fieldPlaceholder}
+        onChange={onChange}
       />
     );
   }
@@ -296,7 +224,7 @@ function FormSurface({
   readonly onNext: () => void;
   readonly onSubmit: () => void;
 }): ReactElement {
-  const objectValue = isPlainObject(value) ? value : {};
+  const objectValue = isRecord(value) ? value : {};
   return (
     <div className="tcw-question-actions tcw-question-form">
       {stepped ? (

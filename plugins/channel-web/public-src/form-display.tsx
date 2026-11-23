@@ -11,36 +11,16 @@
  * the update parser for a reaction), with the page CSP's `img-src` as the backstop.
  */
 import type { JsonSchema } from '@tai42/studio-sdk';
-import { fieldDrawingOrder, isFieldVisible } from '@tai42/studio-sdk';
+import {
+  fieldDrawingOrder,
+  formatReadbackValue,
+  isFieldVisible,
+  slotValueText,
+} from '@tai42/studio-sdk';
 import type { ReactElement } from 'react';
 
+import { isRecord } from '@/guards';
 import type { DisplayBlock, DisplayText, FieldWording } from '@/transcript-model';
-
-/** A plain JS object, or not. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-/** An arbitrary value as display text: primitives direct, objects/arrays as JSON. */
-function toText(value: unknown): string {
-  switch (typeof value) {
-    case 'string':
-      return value;
-    case 'number':
-    case 'boolean':
-    case 'bigint':
-      return String(value);
-    default:
-      return JSON.stringify(value);
-  }
-}
-
-/** A display slot's current value as text (a computed total is a number); absent or `null`
- * (the slot unfilled) → undefined. */
-function slotValueText(value: DisplayText | undefined): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  return String(value);
-}
 
 /** An image display block: the reaction's source for its slot when one arrived (`null`
  * clears it), else the block's own; with no source it degrades to its alt text. */
@@ -118,16 +98,6 @@ export function DisplayBlocks({
   );
 }
 
-/** One answered value rendered for the review readback; an empty value reads as "—", a
- * yes/no value as the field's own `trueLabel` / `falseLabel`, else "Yes" / "No". */
-function formatReadbackValue(value: unknown, words: FieldWording | undefined): string {
-  if (value === undefined || value === null || value === '') return '—';
-  if (Array.isArray(value)) return value.length === 0 ? '—' : value.map(toText).join(', ');
-  if (typeof value === 'boolean')
-    return value ? (words?.trueLabel ?? 'Yes') : (words?.falseLabel ?? 'No');
-  return toText(value);
-}
-
 /**
  * A review step's generic readback: each VISIBLE top-level field's label and the value
  * entered for it, in drawing order (each `timeOf` time right after its date). A field hidden by its `visibleWhen` predicate is absent — it is absent
@@ -142,12 +112,12 @@ export function ReviewReadback({
   readonly value: Readonly<Record<string, unknown>>;
   readonly fieldWording: Readonly<Record<string, FieldWording>>;
 }): ReactElement | null {
-  const properties = isPlainObject(schema.properties) ? schema.properties : {};
+  const properties = isRecord(schema.properties) ? schema.properties : {};
   const rows = fieldDrawingOrder(Object.keys(properties), properties)
     .map((name) => [name, properties[name]] as const)
     .filter(
       (row): row is readonly [string, JsonSchema] =>
-        isPlainObject(row[1]) && isFieldVisible(row[1], value),
+        isRecord(row[1]) && isFieldVisible(row[1], value),
     );
   if (rows.length === 0) return null;
   return (
@@ -155,7 +125,7 @@ export function ReviewReadback({
       {rows.map(([name, prop]) => (
         <div key={name} className="tcw-form-review-row">
           <dt className="tcw-form-review-term">
-            {isPlainObject(prop) && typeof prop.title === 'string' ? prop.title : name}
+            {isRecord(prop) && typeof prop.title === 'string' ? prop.title : name}
           </dt>
           <dd className="tcw-form-review-value">
             {formatReadbackValue(value[name], fieldWording[name])}
