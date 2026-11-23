@@ -10,14 +10,13 @@ mounted app did with the tail); and that an emit failure is loud and never break
 the request, while a disabled toggle leaves the middleware unregistered. The
 sub-MCP router (``/app``) registers this middleware for ITS OWN sub-app, so a
 sub-MCP request records two lines (outer ``/app/<unmatched>`` + the sub-app's own
-inner route); the env prefix is ``TAI_AUDIT_LOG_``."""
+line, its route under the sub-app's root path); the env prefix is ``TAI_AUDIT_LOG_``."""
 
 from __future__ import annotations
 
 import logging
 import re
 from datetime import datetime
-from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -96,10 +95,10 @@ async def _ok(scope: Scope, receive: Receive, send: Send) -> None:
 
 
 async def _routed_ok(scope: Scope, receive: Receive, send: Send) -> None:
-    """``_ok``, plus the ``endpoint`` mark a Starlette route match leaves — a
-    hand-built scope carries no routing of its own, so a scope standing in for a
-    routed request has to say so itself."""
-    scope["endpoint"] = _ok
+    """``_ok``, plus the route mark a Starlette router match leaves — a hand-built
+    scope carries no routing of its own, so a scope standing in for a routed request
+    has to say so itself."""
+    scope["route"] = Route(scope["path"], _ok)
     await _ok(scope, receive, send)
 
 
@@ -155,9 +154,9 @@ async def test_the_audit_record_is_emitted_at_info(caplog):
 
 
 async def test_route_template_wins_over_the_concrete_path(caplog):
-    # A route OBJECT on the scope (FastAPI's) wins outright — no reconstruction attempted.
+    # The route OBJECT on the scope names the template — the concrete path is never read.
     async def routed(scope: Scope, receive: Receive, send: Send) -> None:
-        scope["route"] = SimpleNamespace(path="/api/things/{thing_id}")
+        scope["route"] = Route("/api/things/{thing_id}", _ok)
         await _ok(scope, receive, send)
 
     with caplog.at_level(logging.INFO):
@@ -168,9 +167,8 @@ async def test_route_template_wins_over_the_concrete_path(caplog):
 
 # -- Real routers: the path-borne credential never reaches the line -----------
 #
-# Drives the REAL middleware through a REAL router (Starlette's, which records no
-# route object) and asserts both halves: the template shows up, the concrete value
-# does not.
+# Drives the REAL middleware through a REAL router (Starlette's) and asserts both
+# halves: the template shows up, the concrete value does not.
 
 _TICKET = "tkt_9f3a2b7c"
 
@@ -211,9 +209,6 @@ def _starlette_app() -> Starlette:
         (f"/api/interactions/callback/{_TICKET}", "/api/interactions/callback/{ticket}", _TICKET),
         # A ``:path`` parameter spanning several segments collapses to one placeholder.
         ("/files/a/b/c.txt", "/files/{rest}", "a/b/c.txt"),
-        # A value equal to a LITERAL route segment: over-replacing wins, both
-        # segments become the placeholder.
-        ("/trigger/trigger", "/{token}/{token}", "trigger"),
     ],
 )
 def test_starlette_router_audits_the_template_never_the_value(caplog, url: str, route: str, value: str):
@@ -241,19 +236,17 @@ def test_starlette_router_audits_a_parameterless_route_as_its_own_path(caplog):
 @pytest.mark.parametrize(
     ("url", "route"),
     [
-        # Matched as a whole SEGMENT run, never a substring: ``thing`` sits inside
-        # the route's own literal ``things``; a plain replace would wrongly cut it
-        # mid-segment.
+        # A value equal to a LITERAL route segment: the literal stays.
+        ("/trigger/trigger", "/trigger/{token}"),
+        # A value that sits inside the route's own literal (``thing`` in ``things``).
         ("/api/things/thing", "/api/things/{name}"),
-        # Longest value FIRST: ``{p:path}`` holds ``a/b``, ``{q}`` holds ``a``;
-        # short-first would strand a ``b`` segment in the line.
+        # One value contained in another: ``{p:path}`` holds ``a/b``, ``{q}`` holds ``a``.
         ("/x/a/a/b", "/x/{q}/{p}"),
-        # An EMPTY ``:path`` value is no needle: unskipped, it would match every
-        # empty segment and stamp placeholders over the path's own edges.
-        ("/files/", "/files/"),
+        # An EMPTY ``:path`` value is still its parameter.
+        ("/files/", "/files/{rest}"),
     ],
 )
-def test_starlette_router_rebuilds_the_template_from_whole_segments(caplog, url: str, route: str):
+def test_starlette_router_states_the_template_whatever_the_values(caplog, url: str, route: str):
     app = _starlette_app()
     app.add_middleware(AuditLogMiddleware)
 
@@ -392,10 +385,8 @@ def test_a_mounted_opaque_app_audits_its_prefix_and_never_the_tail(caplog, tail:
     ids=["inner-route-with-a-param", "inner-static-route", "inner-router-turned-it-away"],
 )
 def test_a_mounted_starlette_router_audits_the_prefix_not_its_inner_template(caplog, url: str, status: int):
-    # A mounted Starlette router that MATCHES is indistinguishable from one where
-    # nothing inside it matched — both carry the mount's grown root path and an
-    # endpoint mark. The inner template isn't provable, so the tail is dropped
-    # either way.
+    # What a mounted Starlette router matched is that router's business: the line
+    # states the mount prefix and drops the tail whether or not an inner route matched.
     app = Starlette(routes=[Mount("/mnt", routes=[Route("/x/{sub}", _hello), Route("/static", _hello)])])
     app.add_middleware(AuditLogMiddleware)
 
@@ -407,8 +398,8 @@ def test_a_mounted_starlette_router_audits_the_prefix_not_its_inner_template(cap
 
 
 def test_a_mounted_fastapi_router_keeps_its_full_template(caplog):
-    # The one mounted router whose match IS provable: FastAPI's route-object mark
-    # is written by nothing else, so a mounted FastAPI app keeps full templating.
+    # A FastAPI route states its own template wherever it was routed from, so a
+    # mounted FastAPI app keeps full templating.
     sub = FastAPI()
 
     @sub.get("/thing/{thing_id}")
@@ -456,6 +447,22 @@ def test_the_mount_prefix_is_route_text_and_is_stated_as_such(caplog, routes, ur
     assert _one_audit_line(caplog).group("route") == route
     assert _TOKEN not in _module_log_text(caplog)
     assert "acme-corp" not in _module_log_text(caplog)
+
+
+def test_a_zero_width_mount_under_a_host_mount_audits_the_constant(caplog):
+    # The host's ``Mount("/")`` already stamped ``app_root_path`` and the app's own
+    # ``Mount("/")`` grows no root path: the recorded ``Mount`` is what says the
+    # request crossed into the mounted app.
+    def hosted() -> Starlette:
+        inner = Starlette(routes=[Mount("/", app=_OpaqueSubApp())])
+        inner.add_middleware(AuditLogMiddleware)
+        return Starlette(routes=[Mount("/", app=inner)])
+
+    with caplog.at_level(logging.INFO), TestClient(hosted()) as client:
+        assert client.get(f"/{_TOKEN}/served").status_code == 200
+
+    assert _one_audit_line(caplog).group("route") == "<unmatched>"
+    assert _TOKEN not in _module_log_text(caplog)
 
 
 def test_a_mounted_deployment_audits_the_mount_prefix_under_its_host_prefix(caplog):
@@ -734,7 +741,7 @@ async def _built_sub_app(router, slug: str):
 
 
 async def test_sub_mcp_sub_app_registers_the_audit_middleware_outside_the_body_cap(monkeypatch):
-    # Task 2: the sub-MCP router audits ITS OWN sub-app, gated on the SAME switch and
+    # The sub-MCP router audits ITS OWN sub-app, gated on the SAME switch and
     # positioned OUTSIDE the body cap (audit wraps the cap, the base-app order).
     from tai42_skeleton.app import instance, sub_mcp_app
     from tai42_skeleton.manifest import Manifest
@@ -769,7 +776,7 @@ async def test_sub_mcp_sub_app_omits_the_audit_middleware_when_disabled(monkeypa
 
 
 async def test_a_sub_mcp_request_records_both_the_outer_and_the_inner_audit_line(caplog, monkeypatch):
-    # Task 2 end to end: one sub-MCP request writes TWO audit lines — the base-app
+    # One sub-MCP request writes TWO audit lines — the base-app
     # (outer) line templated to ``/app/<unmatched>`` (the mount's whole tail is the
     # sub-app's business), and the sub-app's OWN (inner) line for its own route. Drives
     # the REAL router + REAL built sub-app under an outer AuditLogMiddleware + a real
@@ -796,6 +803,29 @@ async def test_a_sub_mcp_request_records_both_the_outer_and_the_inner_audit_line
     assert "/app/<unmatched>" in routes
     assert routes != {"/app/<unmatched>"}
     assert _TOKEN not in _module_log_text(caplog)
+
+
+async def test_a_sub_mcp_request_matched_inside_the_sub_app_records_its_route_under_the_sub_app_root(
+    caplog, monkeypatch
+):
+    # The inner line of a sub-MCP request the sub-app routes states the sub-app's route
+    # with the sub-app's root path in front; the outer line still stops at the mount.
+    from tai42_skeleton.app import instance, sub_mcp_app
+    from tai42_skeleton.manifest import Manifest
+
+    monkeypatch.setattr(sub_mcp_app, "audit_log_settings", lambda: AuditLogSettings())
+
+    async with instance.app.app_context(Manifest.model_validate({})):
+        router = instance.app.sub_app.mcp_sub_app_router
+        async with router.lifespan(None):  # type: ignore[arg-type]
+            await _built_sub_app(router, "svc")
+            outer = AuditLogMiddleware(Starlette(routes=[Mount("/app", app=router)]))
+
+            with caplog.at_level(logging.INFO):
+                await _run(outer, _scope(path="/app/svc/", method="GET"))
+
+    routes = sorted(_AUDIT_LINE.fullmatch(line).group("route") for line in _audit_lines(caplog))  # type: ignore[union-attr]
+    assert routes == ["/app/<unmatched>", "/app/svc/"], routes
 
 
 # -- Refusal lines at the refusal sites (401 / 403; 429 lives with the limiter) ---
