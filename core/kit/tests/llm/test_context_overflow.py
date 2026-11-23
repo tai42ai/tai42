@@ -13,6 +13,7 @@ from langchain.agents.middleware import (
 )
 from langchain.agents.middleware.context_editing import ClearToolUsesEdit
 from langchain.agents.middleware.summarization import DEFAULT_SUMMARY_PROMPT
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tai42_contract.app import tai42_app
 from tai42_contract.template import TemplatedText, TemplateNotFoundError
@@ -49,15 +50,9 @@ def _bound_manager():
         yield fake
 
 
-def _summary_model(text: str = "SUMMARY") -> MagicMock:
-    """A fake chat model whose async invoke returns a fixed summary."""
-    model = MagicMock()
-
-    async def ainvoke(*_args, **_kwargs):
-        return SimpleNamespace(text=text)
-
-    model.ainvoke = ainvoke
-    return model
+def _summary_model(text: str = "SUMMARY") -> FakeListChatModel:
+    """A chat model that answers every call with a fixed summary."""
+    return FakeListChatModel(responses=[text])
 
 
 @contextmanager

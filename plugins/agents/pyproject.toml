@@ -43,7 +43,7 @@ dependencies = [
     # The prebuilt agent constructor (``langchain.agents.create_agent``) the
     # tools agents build on. A distinct distribution from langchain-core, imported
     # directly, so it is declared here rather than leaned on as a transitive.
-    "langchain>=1.3.11",
+    "langchain>=1.5.2",
     # The model layer the agents describe tool inputs and structured outputs with
     # (``pydantic.BaseModel`` across the agent modules). Declared directly rather
     # than relied on as a transitive of the runtime.
