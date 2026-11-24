@@ -7,17 +7,38 @@ a worker process of
 environment sealed out, compiled (:func:`compile_jq`), and cached in the worker under the digest the
 caller computed from that source; the caller sends the digest with every evaluation and the source
 only when the worker reports a miss, so a warm evaluation ships the digest and the input text alone.
+The number of values an evaluation takes travels in the envelope and bounds the program itself, so a
+worker runs every program to its end and keeps no evaluation's input past it; a program that ends
+itself does so through the same end, ``halt`` ending its stream and ``halt_error`` raising.
 A program that does not compile raises :class:`~tai42_kit.utils.data.jq_errors.JqCompileError`; one
 that raises while it runs, :class:`~tai42_kit.utils.data.jq_errors.JqEvaluationError`.
 """
 
-import itertools
 import re
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
 from tai42_kit.utils.data.jq_errors import JqCompileError, JqEvaluationError
+
+# Two builtins the binding cannot observe, implemented in the generated line: libjq records
+# ``halt`` and ``halt_error`` as a halted state and ends the stream with no value and no
+# message, so the binding reads a halt as a plain end and keeps the halted state, input
+# included, until the program's next run. ``halt`` is a break to a label around the whole
+# program: the stream ends with no further value, as jq documents, and the state unwinds.
+# ``halt_error`` is a jq error carrying its input as jq itself prints it (a string raw, any
+# other value as compact JSON); its exit code is a process exit status an evaluation has no
+# use for and is not carried. ``halt_error/0`` is redefined too, because jq binds its own
+# ``def halt_error: halt_error(5);`` to the builtin before any program is read. Both are
+# plain jq errors under the hood, so whatever catches a jq error catches them too (``try``,
+# ``EXP?``, and ``?//``, which runs its body again with the next pattern), which a jq
+# process would not allow.
+_HALT_PREAMBLE = (
+    "label $__halt | def halt: break $__halt; "
+    'def halt_error($code): if ($code | type) != "number" then error("halt_error/1: number required") '
+    'else error(if type == "string" then . else tojson end) end; '
+    "def halt_error: halt_error(5); "
+)
 
 # Guard prefix that seals the process environment out of every compiled
 # expression: ``env`` is shadowed by a builtin that raises when called (it cannot
@@ -27,8 +48,8 @@ from tai42_kit.utils.data.jq_errors import JqCompileError, JqEvaluationError
 # zero false negatives. The substring reject over-rejects (false positive) an
 # expression that merely contains ``$ENV`` inside a string literal, key, or
 # comment — a loud refusal, the correct bias for a security gate.
-# The prefix opens no paren: in jq's grammar both ``def …; Exp`` and
-# ``Term as $x | Exp`` take the whole remaining program, so the guarded program
+# The generated line opens no paren: in jq's grammar ``label $x | Exp``, ``def …; Exp``
+# and ``Term as $x | Exp`` take the whole remaining program, so the guarded program
 # compiles exactly when the bare one does and an unbalanced ``)`` in the
 # expression cannot close a scope the guard opened.
 _GUARD_PREAMBLE = (
@@ -37,11 +58,23 @@ _GUARD_PREAMBLE = (
     "{} as $ENV | "
 )
 
-# The two envelope keys every compiled program reads its evaluation input from:
+# The three envelope keys every compiled program reads its evaluation input from:
 # ``d`` carries the data the expression is about (its ``.``), ``v`` the map of
-# variable values. The binding preamble unpacks both.
+# variable values, ``n`` the number of values the evaluation takes. The binding
+# preamble unpacks ``d`` and ``v``; the bound around the author's text reads ``n``.
 _ENVELOPE_DATA = "d"
 _ENVELOPE_VARS = "v"
+_ENVELOPE_COUNT = "n"
+
+# The bound the executed program wraps the author's text in. jq's ``limit`` stops
+# the text's stream after its ``n``-th value without resuming it, so every run
+# reaches the end of its stream: the binding keeps a compiled program's state for
+# its next run, and a state whose stream ended holds no input. The bound opens at
+# the end of the generated line, so the author's text keeps its line numbers; it
+# closes after two newlines, which end a trailing comment and a comment continued
+# by a final backslash.
+_BOUND_OPEN = f"limit($__in.{_ENVELOPE_COUNT}; ("
+_BOUND_CLOSE = "\n\n))"
 
 # Variable names an author may not bind, because the binding mechanism and jq
 # reserve them: ``__in`` is the envelope binding, ``ENV`` the sealed environment
@@ -68,14 +101,15 @@ _ERROR_HEADER_RE = re.compile(r"^(jq: error: .*) at <top-level>, line (\d+), col
 COMPILED_CACHE_SIZE = 512
 
 
-def envelope(payload: Any, variables: dict[str, Any] | None = None) -> dict[str, Any]:
+def envelope(payload: Any, variables: dict[str, Any] | None, count: int) -> dict[str, Any]:
     """The evaluation input every compiled program takes.
 
-    The data lands under ``d`` (the expression's ``.``) and the variable values under
-    ``v``; the binding preamble the compile generates unpacks both back into ``.`` and
-    the named ``$name`` bindings.
+    The data lands under ``d`` (the expression's ``.``), the variable values under ``v``
+    and ``count``, the number of values the run takes, under ``n``; the program the
+    compile builds unpacks ``d`` and ``v`` back into ``.`` and the named ``$name``
+    bindings and emits at most ``n`` values.
     """
-    return {_ENVELOPE_VARS: dict(variables or {}), _ENVELOPE_DATA: payload}
+    return {_ENVELOPE_VARS: dict(variables or {}), _ENVELOPE_DATA: payload, _ENVELOPE_COUNT: count}
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,13 +127,13 @@ class JqSource:
 
 
 def _binding_preamble(variable_names: tuple[str, ...]) -> str:
-    """The generated jq that unpacks the ``{"v": {…}, "d": data}`` envelope.
+    """The generated jq that unpacks the ``{"v": {…}, "d": data, "n": count}`` envelope.
 
     ``.`` starts as the envelope: it is captured as ``$__in``, each name is bound from
     ``$__in.v.<name>`` to ``$<name>`` (readable anywhere, inside ``map(...)`` too), and
-    ``$__in.d`` restores the data as ``.``. The author's text (prelude, then expression)
-    follows the closing pipe whole, so the program compiles exactly when the author's text
-    does with the variable names defined. The preamble holds no newline.
+    ``$__in.d`` restores the data as ``.``. What follows the closing pipe takes the whole
+    remaining program, so the author's text placed there bare compiles exactly when it does
+    alone with the variable names defined. The preamble holds no newline.
     """
     bindings = "".join(f"$__in.{_ENVELOPE_VARS}.{name} as ${name} | " for name in variable_names)
     return f". as $__in | {bindings}$__in.{_ENVELOPE_DATA} | "
@@ -128,20 +162,11 @@ def is_empty_expression(expression: str) -> bool:
     return not expression.strip()
 
 
-def compile_jq(source: JqSource):
-    """Compile ``source`` over the envelope with the process environment sealed out.
+def _author_text(source: JqSource) -> tuple[str, int]:
+    """The author's text of ``source`` (prelude, then expression on its own line) and the prelude's line count.
 
-    Raises :class:`JqCompileError` on a syntax error (a ``module``, ``include`` or ``import``
-    directive among them), a reference to an undeclared ``$name``, a reserved variable name, a
-    variable name that is not a jq identifier, a reference to ``$ENV`` / ``$__in``, a NUL
-    character, text that is not valid Unicode, or an empty expression; jq's message names the
-    author's own line and column, ``at <prelude>`` for an error inside the prelude. Inside the
-    program ``$__loc__`` reports the compiled text's line, the author's line plus one.
+    Raises :class:`JqCompileError` for every refusal :func:`compile_jq` makes before jq sees the text.
     """
-    # Opt-in dependency (the "jq" extra) — imported at call time so the module
-    # (and the utils.data namespace) stays importable without it.
-    import jq
-
     expression, prelude, variable_names = source.expression, source.prelude, source.variables
     if "$ENV" in expression or "$ENV" in prelude:
         raise JqCompileError("jq: $ENV is disabled (process environment is not readable from expressions)")
@@ -167,12 +192,43 @@ def compile_jq(source: JqSource):
         raise JqCompileError(f"jq: the program is not valid Unicode text at offset {exc.start}: {exc.reason}") from exc
     if is_empty_expression(expression):
         raise JqCompileError('jq: the expression is empty (try ".")')
+    return author_text, prelude.count("\n")
+
+
+def compile_jq(source: JqSource):
+    """Compile ``source`` over the envelope with the process environment sealed out.
+
+    Raises :class:`JqCompileError` on a syntax error (a ``module``, ``include`` or ``import``
+    directive among them), a reference to an undeclared ``$name``, a reserved variable name, a
+    variable name that is not a jq identifier, a reference to ``$ENV`` / ``$__in``, a NUL
+    character, text that is not valid Unicode, or an empty expression; jq's message names the
+    author's own line and column, ``at <prelude>`` for an error inside the prelude. Inside the
+    program ``$__loc__`` reports the compiled text's line, the author's line plus one.
+
+    The author's text is compiled bare first, and that compile alone accepts or refuses it. The
+    program returned wraps the accepted text in the bound (``limit`` over the envelope's ``n``),
+    which emits the text's first ``n`` values over the same ``.``; wrapping text the bare compile
+    accepted cannot change what compiles, so a wrapped compile that fails raises ``RuntimeError``.
+
+    The compiled program implements ``halt`` as the end of its stream and ``halt_error`` as a
+    runtime error carrying its input, so a halt is never read as an empty result.
+    """
+    # Opt-in dependency (the "jq" extra) — imported at call time so the module
+    # (and the utils.data namespace) stays importable without it.
+    import jq
+
+    author_text, prelude_lines = _author_text(source)
     # The generated text is exactly one line, so the author's text starts on line 2 whole.
-    generated = _GUARD_PREAMBLE + _binding_preamble(variable_names) + "\n"
+    generated = _HALT_PREAMBLE + _GUARD_PREAMBLE + _binding_preamble(source.variables)
     try:
-        return jq.compile(generated + author_text)
+        jq.compile(f"{generated}\n{author_text}")
     except ValueError as exc:
-        raise JqCompileError(_author_message(str(exc), prelude.count("\n"))) from exc
+        raise JqCompileError(_author_message(str(exc), prelude_lines)) from exc
+    bounded = f"{generated}{_BOUND_OPEN}\n{author_text}{_BOUND_CLOSE}"
+    try:
+        return jq.compile(bounded)
+    except ValueError as exc:
+        raise RuntimeError(f"jq: the bounded form of a program that compiles bare does not compile: {exc}") from exc
 
 
 # This worker's compiled programs, keyed by the caller's digest of their source, oldest first.
@@ -194,10 +250,10 @@ def _compile_into_cache(key: str, source: JqSource) -> Any:
     return program
 
 
-def _take(program: Any, input_text: str, count: int) -> list[Any]:
+def _run(program: Any, input_text: str) -> list[Any]:
     # Nothing but the program runs inside the iteration, so jq's ``ValueError`` here is the program's.
     try:
-        return list(itertools.islice(program.input_text(input_text), count))
+        return list(program.input_text(input_text))
     except ValueError as exc:
         raise JqEvaluationError(str(exc)) from exc
 
@@ -208,22 +264,23 @@ def compile_job(key: str, source: JqSource) -> None:
         _compile_into_cache(key, source)
 
 
-def evaluate_cached_job(key: str, input_text: str, count: int) -> list[Any] | None:
-    """The first ``count`` values the program cached under ``key`` emits over ``input_text``.
+def evaluate_cached_job(key: str, input_text: str) -> list[Any] | None:
+    """Every value the program cached under ``key`` emits over the envelope ``input_text``.
 
-    ``None`` when this worker holds no program under ``key``: the caller then sends the
-    source through :func:`compile_and_evaluate_job`. A program that raises while it runs
-    raises :class:`JqEvaluationError` with jq's message.
+    The program emits at most the envelope's count of values (:func:`envelope`). ``None`` when
+    this worker holds no program under ``key``: the caller then sends the source through
+    :func:`compile_and_evaluate_job`. A program that raises while it runs raises
+    :class:`JqEvaluationError` with jq's message.
     """
     program = _cached(key)
     if program is None:
         return None
-    return _take(program, input_text, count)
+    return _run(program, input_text)
 
 
-def compile_and_evaluate_job(key: str, source: JqSource, input_text: str, count: int) -> list[Any]:
+def compile_and_evaluate_job(key: str, source: JqSource, input_text: str) -> list[Any]:
     """Compile ``source`` into this worker's cache under ``key``, then evaluate as :func:`evaluate_cached_job`."""
     program = _cached(key)
     if program is None:
         program = _compile_into_cache(key, source)
-    return _take(program, input_text, count)
+    return _run(program, input_text)

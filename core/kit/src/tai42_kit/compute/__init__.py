@@ -1,7 +1,8 @@
 """CPU-bound work off the event loop: a pool of worker processes, shared with the children a process forks.
 
 :func:`compute_pool` is what runs the process's jobs; :class:`ComputePool` runs a picklable job
-in a worker and awaits it; ``COMPUTE_WORKERS`` sizes it (:class:`ComputeSettings`).
+in a worker and awaits it; ``COMPUTE_WORKERS`` sizes it and ``COMPUTE_WORKER_MAX_TASKS`` sets how
+many jobs a worker runs before a fresh one replaces it (:class:`ComputeSettings`).
 :func:`share_compute_pool` lets the children a process forks run their jobs in its pool. A process
 started through a process prelude runs its jobs in a pool host it starts, through a
 :class:`HostedPool`. A process reaches a pool it does not run through a :class:`ComputePoolClient`.

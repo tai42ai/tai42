@@ -155,14 +155,14 @@ async def _evaluate(expression: str, payload: Any, prelude: str, variables: dict
     """
     names = tuple(sorted(variables))
     key = _program_key(expression, prelude, names)
-    input_text = _envelope_text(envelope(payload, variables))
+    input_text = _envelope_text(envelope(payload, variables, count))
     timeout = jq_settings().timeout_seconds
     pool = compute_pool()
     try:
-        values = await pool.run(evaluate_cached_job, key, input_text, count, timeout=timeout)
+        values = await pool.run(evaluate_cached_job, key, input_text, timeout=timeout)
         if values is None:
             source = JqSource(expression, prelude, names)
-            values = await pool.run(compile_and_evaluate_job, key, source, input_text, count, timeout=timeout)
+            values = await pool.run(compile_and_evaluate_job, key, source, input_text, timeout=timeout)
     except TimeoutError as exc:
         raise _budget_exceeded("evaluation", timeout, expression) from exc
     return values
@@ -217,8 +217,9 @@ async def run_jq_bounded(
 ) -> list[Any]:
     """Compile (cached per worker) and evaluate ``expression`` over ``payload`` in a compute worker.
 
-    Bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted values, taken lazily
-    from the program's iterator. ``variables`` behaves exactly as in :func:`run_jq_first`.
+    Bounded by ``JQ_TIMEOUT_SECONDS``; returns AT MOST ``limit + 1`` emitted values: the count
+    travels in the evaluation envelope and the program itself stops its stream after that many
+    values. ``variables`` behaves exactly as in :func:`run_jq_first`.
 
     For a caller that must enforce an exact emit count: it passes its allowed count as
     ``limit`` and reads ``len(result) > limit`` as "emitted too many". The extra slot

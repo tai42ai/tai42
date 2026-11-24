@@ -22,18 +22,22 @@ def _compile(expression: str, prelude: str = "", variables: tuple[str, ...] = ()
     return compile_jq(JqSource(expression, prelude, variables))
 
 
+# A count past every value any program in this module emits, for a run that takes them all.
+_EVERY_VALUE = 1_000_000
+
+
 def _first(program, data, variables=None):
-    """Evaluate a compiled program over the ``{"v", "d"}`` envelope and take ``.first()``."""
-    return program.input(envelope(data, variables)).first()
+    """Evaluate a compiled program over an envelope that takes one value, and take ``.first()``."""
+    return program.input(envelope(data, variables, 1)).first()
 
 
 def _all(program, data, variables=None):
-    """Evaluate a compiled program over the ``{"v", "d"}`` envelope and take ``.all()``."""
-    return program.input(envelope(data, variables)).all()
+    """Evaluate a compiled program over an envelope that takes every value, and take ``.all()``."""
+    return program.input(envelope(data, variables, _EVERY_VALUE)).all()
 
 
-def _text(data, variables=None) -> str:
-    return json.dumps(envelope(data, variables))
+def _text(data, variables=None, count: int = 1) -> str:
+    return json.dumps(envelope(data, variables, count))
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +110,49 @@ class TestEnvGuard:
             _compile(".x", prelude="def leak: $ENV;")
 
 
+class TestHaltBuiltins:
+    # ``halt`` ends the program's stream with no further value; ``halt_error`` fails the
+    # evaluation with its input as the message, a string as written, anything else as compact JSON.
+
+    def test_halt_error_raises_its_string_input(self):
+        with pytest.raises(ValueError, match=r"^x$"):
+            _first(_compile('"x" | halt_error'), None)
+
+    @pytest.mark.parametrize(
+        ("expression", "message"),
+        [
+            ('"x" | halt_error', "x"),
+            ("{a: 1} | halt_error(3)", '{"a":1}'),
+            ('"v" | halt_error', "v"),
+            ("null | halt_error", "null"),
+            ('1 | halt_error("x")', "halt_error/1: number required"),
+        ],
+    )
+    def test_halt_error_raises_an_evaluation_error(self, expression, message):
+        with pytest.raises(JqEvaluationError) as exc:
+            compile_and_evaluate_job("k", JqSource(expression, "", ()), _text(None))
+        assert str(exc.value) == message
+
+    @pytest.mark.parametrize(
+        ("expression", "count", "values"),
+        [
+            ("1, 2, halt, 3", 3, [1, 2]),
+            ("1, 2, halt, 3", 2, [1, 2]),
+            ("halt", 3, []),
+            ("def stop: halt; 1, stop, 2", 3, [1]),
+        ],
+    )
+    def test_halt_ends_the_stream(self, expression, count, values):
+        assert compile_and_evaluate_job("k", JqSource(expression, "", ()), _text(None, count=count)) == values
+
+    def test_an_author_try_catches_halt_error(self):
+        assert _all(_compile('try ("x" | halt_error) catch "caught"'), None) == ["caught"]
+
+    def test_an_author_definition_and_a_field_named_halt_are_untouched(self):
+        assert _all(_compile("def halt: 42; halt"), None) == [42]
+        assert _all(_compile(".halt"), {"halt": 7}) == [7]
+
+
 class TestEnvelopeSealed:
     # ``$__in`` is the binding mechanism's envelope; a program or a prelude def that
     # names it is refused before the compile, so channel data reaches a program
@@ -164,18 +211,39 @@ class TestPrelude:
         assert "line 2" in str(exc.value)
 
 
-class TestOneCompilePerProgram:
-    """A program compiles once, guarded, whether it compiles or not."""
+class TestBareThenBoundedCompile:
+    """The author's text compiles bare, guarded, to be accepted or refused; an accepted one compiles again bounded."""
 
-    def test_a_successful_compile_compiles_once(self, compiles):
+    def test_an_accepted_program_compiles_bare_then_bounded(self, compiles):
         _compile(".a + $n", "def f: 1;", ("n",))
-        assert len(compiles) == 1
-        assert compiles[0].startswith("def env:")
+        assert len(compiles) == 2
+        bare, bounded = compiles
+        assert bare.startswith("label $__halt | def halt:")
+        assert "limit($__in.n; (" not in bare
+        assert bounded.startswith("label $__halt | def halt:")
+        assert "limit($__in.n; (\ndef f: 1;\n.a + $n" in bounded
 
-    def test_a_failed_compile_compiles_once(self, compiles):
+    def test_a_refused_program_compiles_once(self, compiles):
         with pytest.raises(JqCompileError, match="jq: 1 compile error"):
             _compile(".a + $nope", "def f: 1;", ("n",))
         assert len(compiles) == 1
+
+    def test_text_that_compiles_only_inside_the_bounded_form_is_refused(self, compiles):
+        # Bounded, ``.a) | (.b`` would close the bound's paren early and compile; bare, it is refused.
+        with pytest.raises(JqCompileError) as exc:
+            _compile(".a) | (.b")
+        assert "at <top-level>, line 1, column" in str(exc.value)
+        assert len(compiles) == 1
+
+    def test_a_trailing_comment_and_a_continued_comment_compile(self):
+        for expression in (".a # c", ".a # c \\"):
+            assert _all(_compile(expression), {"a": 1}) == [1]
+
+    def test_an_author_label_is_scoped_inside_the_bound(self):
+        assert _all(_compile("label $out | .a, break $out"), {"a": 1}) == [1]
+
+    def test_the_authors_variable_named_like_the_count_key_reads_its_own_value(self):
+        assert _all(_compile(".a + $n", variables=("n",)), {"a": 1}, {"n": 10}) == [11]
 
 
 class TestCompileErrorMessage:
@@ -339,54 +407,62 @@ class TestCompileErrorMessage:
 
 class TestJobs:
     def test_an_evaluation_under_an_unknown_digest_reports_the_miss(self):
-        assert evaluate_cached_job("k-unknown", _text({"a": 1}), 1) is None
+        assert evaluate_cached_job("k-unknown", _text({"a": 1})) is None
 
     def test_a_miss_compiles_caches_and_evaluates(self, compiles):
-        assert compile_and_evaluate_job("k", JqSource(".a", "", ()), _text({"a": 1}), 1) == [1]
-        assert evaluate_cached_job("k", _text({"a": 2}), 1) == [2]
-        assert len(compiles) == 1
+        assert compile_and_evaluate_job("k", JqSource(".a", "", ()), _text({"a": 1})) == [1]
+        assert evaluate_cached_job("k", _text({"a": 2})) == [2]
+        assert len(compiles) == 2
 
     def test_same_names_different_values_reuse_one_compile(self, compiles):
         source = JqSource(".a + $bump", "", ("bump",))
-        assert compile_and_evaluate_job("k", source, _text({"a": 1}, {"bump": 10}), 1) == [11]
-        assert evaluate_cached_job("k", _text({"a": 5}, {"bump": 100}), 1) == [105]
-        assert len(compiles) == 1
+        assert compile_and_evaluate_job("k", source, _text({"a": 1}, {"bump": 10})) == [11]
+        assert evaluate_cached_job("k", _text({"a": 5}, {"bump": 100})) == [105]
+        assert len(compiles) == 2
 
     def test_a_cached_program_is_not_recompiled_when_its_source_arrives_again(self, compiles):
         compile_job("k", JqSource(".hit", "", ()))
         compile_job("k", JqSource(".hit", "", ()))
-        assert compile_and_evaluate_job("k", JqSource(".hit", "", ()), _text({"hit": 3}), 1) == [3]
-        assert len(compiles) == 1
+        assert compile_and_evaluate_job("k", JqSource(".hit", "", ()), _text({"hit": 3})) == [3]
+        assert len(compiles) == 2
 
     def test_a_compile_job_raises_the_compile_error_and_caches_nothing(self):
         with pytest.raises(ValueError, match="syntax error"):
             compile_job("k", JqSource("this is (not valid", "", ()))
-        assert evaluate_cached_job("k", _text(None), 1) is None
+        assert evaluate_cached_job("k", _text(None)) is None
 
     def test_the_count_bounds_the_values_taken_lazily(self):
         # A 100M-value stream under count 2 yields two values without materializing the rest.
-        assert compile_and_evaluate_job("k", JqSource("range(100000000)", "", ()), _text(None), 2) == [0, 1]
+        assert compile_and_evaluate_job("k", JqSource("range(100000000)", "", ()), _text(None, count=2)) == [0, 1]
+
+    def test_a_run_that_stops_early_never_resumes_the_program(self):
+        # The second value raises; a run that takes one value stops before the program reaches it.
+        source = JqSource('.[] | if . == 2 then error("boom") else . end', "", ())
+        assert compile_and_evaluate_job("k", source, _text([1, 2])) == [1]
+
+    def test_a_run_takes_every_value_up_to_the_count(self):
+        assert compile_and_evaluate_job("k", JqSource(".[]", "", ()), _text([1, 2, 3], count=5)) == [1, 2, 3]
 
     def test_an_empty_stream_is_the_empty_list(self):
-        assert compile_and_evaluate_job("k", JqSource(".[]", "", ()), _text([]), 1) == []
+        assert compile_and_evaluate_job("k", JqSource(".[]", "", ()), _text([])) == []
 
     def test_an_authored_error_is_an_evaluation_error_with_its_text(self):
         with pytest.raises(JqEvaluationError) as exc:
-            compile_and_evaluate_job("k", JqSource('error("boom")', "", ()), _text(None), 1)
+            compile_and_evaluate_job("k", JqSource('error("boom")', "", ()), _text(None))
         assert str(exc.value) == "boom"
 
     def test_a_runtime_type_error_is_an_evaluation_error_in_jqs_words(self):
         compile_job("k", JqSource(".a", "", ()))
         with pytest.raises(JqEvaluationError) as exc:
-            evaluate_cached_job("k", _text(1), 1)
+            evaluate_cached_job("k", _text(1))
         assert str(exc.value) == 'Cannot index number with string ("a")'
 
     def test_the_least_recently_used_program_leaves_a_full_cache(self, monkeypatch):
         monkeypatch.setattr(jq_worker, "COMPILED_CACHE_SIZE", 2)
         compile_job("one", JqSource("1", "", ()))
         compile_job("two", JqSource("2", "", ()))
-        assert evaluate_cached_job("one", _text(None), 1) == [1]
+        assert evaluate_cached_job("one", _text(None)) == [1]
         compile_job("three", JqSource("3", "", ()))
-        assert evaluate_cached_job("two", _text(None), 1) is None
-        assert evaluate_cached_job("one", _text(None), 1) == [1]
-        assert evaluate_cached_job("three", _text(None), 1) == [3]
+        assert evaluate_cached_job("two", _text(None)) is None
+        assert evaluate_cached_job("one", _text(None)) == [1]
+        assert evaluate_cached_job("three", _text(None)) == [3]

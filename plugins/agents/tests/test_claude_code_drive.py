@@ -28,6 +28,7 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.conversations import ReplyTo, ReplyToStatus
 from tai42_contract.interactions import AskAnswer
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
+from tai42_contract.sandbox import SandboxSession, SandboxSessionSpec
 from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 import tai42_agents.claude_code.agent as agent_module
@@ -54,6 +55,7 @@ from ._claude_stubs import (
     VERSION_MISMATCH,
     payload_for,
 )
+from ._sandbox_fake import make_fake_sandbox
 
 _DIGEST = "registry.example/claude@sha256:" + "c" * 64
 
@@ -280,7 +282,20 @@ def test_async_ask_on_ephemeral_run_is_refused(monkeypatch: pytest.MonkeyPatch) 
 def test_ephemeral_run_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
-    _run(build_local_app(), user_message=TemplatedText(content="hi"))
+    # The cache keys weak references and the run destroys its ephemeral session, so the test holds every
+    # session the sandbox creates: a wrongly cached entry then stays in the cache for the assertion to see.
+    sandbox = make_fake_sandbox()
+    created: list[SandboxSession] = []
+    create_session = sandbox.create_session
+
+    async def _create_and_hold(spec: SandboxSessionSpec) -> SandboxSession:
+        session = await create_session(spec)
+        created.append(session)
+        return session
+
+    monkeypatch.setattr(sandbox, "create_session", _create_and_hold)
+    _run(build_local_app(sandbox=sandbox), user_message=TemplatedText(content="hi"))
+    assert len(created) == 1
     assert live_sessions_module.LIVE_SESSIONS == {}
 
 

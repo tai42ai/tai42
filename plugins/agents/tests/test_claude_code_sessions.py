@@ -151,7 +151,8 @@ def _bearer_cred() -> ConnectionCred:
 def test_threaded_turn_captures_and_persists_the_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
     _settings(monkeypatch)
     monkeypatch.setattr(workspace_module, "runner_payload_files", payload_for(MESSAGE))
-    events = _run(build_local_app(), user_message=TemplatedText(content="hi"), thread_id="t1")
+    app = build_local_app()  # its sandbox holds the session the cache entry points at
+    events = _run(app, user_message=TemplatedText(content="hi"), thread_id="t1")
     assert any(isinstance(e, MessageFinal) for e in events)
     session = live_sessions_module.LIVE_SESSIONS[workspace_key_for("claude_code", "t1")]
     raw = asyncio.run(session.get_file(".runner/session_id"))

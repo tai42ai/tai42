@@ -48,6 +48,20 @@ def test_the_first_call_starts_a_pool_sized_by_compute_workers(monkeypatch: pyte
     assert asyncio.run(pool.run(operator.add, 1, 2)) == 3
 
 
+def test_the_started_pool_replaces_a_worker_after_compute_worker_max_tasks_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPUTE_WORKER_MAX_TASKS", "1")
+
+    pool = _own_pool()
+
+    async def two_pids() -> list[int]:
+        return [await pool.run(os.getpid), await pool.run(os.getpid)]
+
+    first, second = asyncio.run(two_pids())
+    assert first != second
+
+
 def test_every_call_in_the_process_returns_the_same_pool() -> None:
     assert compute_pool() is compute_pool()
 
@@ -157,7 +171,7 @@ def test_the_fork_hook_forgets_the_inherited_pool_and_lock_and_the_child_registr
 ) -> None:
     inherited_lock = threading.Lock()
     inherited_children = {object()}
-    monkeypatch.setattr(process_pool_module, "_pool", ComputePool(1))
+    monkeypatch.setattr(process_pool_module, "_pool", ComputePool(1, max_tasks=10_000))
     monkeypatch.setattr(process_pool_module, "_lock", inherited_lock)
     monkeypatch.setattr(multiprocessing.process, "_children", inherited_children)
 

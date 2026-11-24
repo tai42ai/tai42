@@ -18,21 +18,28 @@ from collections.abc import Sequence
 from typing import Final
 
 from tai42_kit.interactions.park_index import ParkIndex
+from tai42_kit.settings import register_settings_reset
 
-from tai42_agents.settings import AgentsParkRedisSettings, agents_park_redis_settings
+from tai42_agents.settings import agents_park_redis_settings
 
 AGENTS_PARK_NAMESPACE: Final[str] = "agent:park"
 
-_bound: tuple[AgentsParkRedisSettings, ParkIndex] | None = None
+_index: ParkIndex | None = None
 
 
 def agents_park_index() -> ParkIndex:
-    """The agents' park index over the current park Redis settings (rebuilt when a settings reload replaces them)."""
-    global _bound
-    settings = agents_park_redis_settings()
-    if _bound is None or _bound[0] is not settings:
-        _bound = (settings, ParkIndex(AGENTS_PARK_NAMESPACE, settings))
-    return _bound[1]
+    """The agents' park index over the park Redis settings current when it was built; a settings reset drops it."""
+    global _index
+    if _index is None:
+        _index = ParkIndex(AGENTS_PARK_NAMESPACE, agents_park_redis_settings())
+    return _index
+
+
+@register_settings_reset
+def _drop_park_index() -> None:
+    """Drop the index at a settings reset; the next call rebuilds it over the then-current settings."""
+    global _index
+    _index = None
 
 
 def park_index_configured() -> bool:

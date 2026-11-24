@@ -37,6 +37,7 @@ needs different behavior monkeypatches the exact seam it calls.
 from __future__ import annotations
 
 import contextlib
+import functools
 import mimetypes
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -576,7 +577,7 @@ def storage() -> Iterator[RecordingStorage]:
 def bind_park_index(monkeypatch: pytest.MonkeyPatch, redis: Any, *, configured: bool = True) -> None:
     """Bind the agents' park index to ``redis`` (an in-process fake) and report the park Redis as
     configured (or not), so every park read and write in the test goes through the kit library over
-    that one client."""
+    that one client — the index a settings reset in the test rebuilds included."""
     from tai42_kit.interactions.park_index import ParkIndex
 
     from tai42_agents._internal.park import park_binding
@@ -589,9 +590,8 @@ def bind_park_index(monkeypatch: pytest.MonkeyPatch, redis: Any, *, configured: 
         yield redis
 
     monkeypatch.setattr(park_binding, "agents_park_redis_settings", lambda: settings)
-    monkeypatch.setattr(
-        park_binding, "_bound", (settings, ParkIndex(park_binding.AGENTS_PARK_NAMESPACE, settings, client=_client))
-    )
+    monkeypatch.setattr(park_binding, "ParkIndex", functools.partial(ParkIndex, client=_client))
+    monkeypatch.setattr(park_binding, "_index", None)
 
 
 @pytest.fixture
