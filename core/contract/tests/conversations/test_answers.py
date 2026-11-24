@@ -36,13 +36,29 @@ def test_conversation_answer_rejects_blank_answer(blank: str):
         ConversationAnswer(message_id="m-1", thread_id="t", status="error", answer=blank)
 
 
-@pytest.mark.parametrize("status", ["answered", "error"])
-def test_conversation_answer_requires_answer_text_for_non_silent(status: str):
+def test_conversation_answer_requires_answer_text_when_answered():
     from tai42_contract.conversations import ConversationAnswer
 
-    body: dict[str, Any] = {"message_id": "m-1", "thread_id": "t", "status": status, "answer": None}
+    body: dict[str, Any] = {"message_id": "m-1", "thread_id": "t", "status": "answered", "answer": None}
     with pytest.raises(ValidationError, match=r"carries answer text"):
         ConversationAnswer(**body)
+
+
+def test_conversation_answer_error_may_carry_no_answer():
+    from tai42_contract.conversations import ConversationAnswer
+
+    failed = ConversationAnswer(message_id="m-1", thread_id="t", status="error")
+    assert failed.answer is None
+    assert failed.model_dump(exclude_none=True) == {"message_id": "m-1", "thread_id": "t", "status": "error"}
+
+
+def test_conversation_answer_error_without_answer_carries_no_parts():
+    from tai42_contract.conversations import AnswerPart, ConversationAnswer
+    from tai42_contract.interactions.models import MediaItem, MediaKind
+
+    media_only = AnswerPart(message="", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/c.png")])
+    with pytest.raises(ValidationError, match=r"error answer with no answer text carries no parts"):
+        ConversationAnswer(message_id="m-1", thread_id="t", status="error", parts=[media_only])
 
 
 def test_conversation_answer_silent_carries_no_answer_text():

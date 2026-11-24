@@ -109,19 +109,20 @@ def _check_pairing_code_template(template: str) -> str:
 class ReplyTexts(BaseModel):
     """The caller's words for the platform's fixed participant replies on one route. Frozen, strict keys.
 
-    ``error`` is sent when a turn fails and the target gave no reply; ``slow_down`` when an address
-    is over the turn cap; ``pairing_linked`` when a pair code was redeemed and the two persons
-    merged; ``pairing_unlinked`` when ``/unlink`` detached the address; ``pairing_not_linked`` when
-    ``/unlink`` came from an address linked to nothing; ``pairing_code_invalid`` when a redeem was
-    refused; ``pairing_code`` is the ``/link`` reply carrying the fresh code, a template that MUST
-    reference ``{pairing_code}`` and may reference ``{expires_at}`` (the code's ISO-8601 expiry),
-    with no conversion or format spec; ``pairing_link_unavailable`` when a redeem met a person being
-    erased (its code is consumed, so the reply asks for a new one); ``pairing_unlink_unavailable``
-    when ``/unlink`` met the sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /
-    ``rejected_could_not_receive`` / ``rejected_unreadable`` / ``rejected_choice_unavailable`` are the
-    notices for an inbound message the channel cannot bridge, a file over the cap, a file the channel
-    could not fetch, an inbound message whose body the channel could not read, and a tap on a choice
-    the channel can no longer read. Every member but
+    ``error`` is sent when a turn the participant sent fails and the target gave no reply;
+    ``slow_down`` when an address is over the turn cap; ``pairing_linked`` when a pair code was
+    redeemed and the two persons merged; ``pairing_unlinked`` when ``/unlink`` detached the
+    address; ``pairing_not_linked`` when ``/unlink`` came from an address linked to nothing;
+    ``pairing_code_invalid`` when a redeem was refused; ``pairing_code`` is the ``/link`` reply
+    carrying the fresh code, a template that MUST reference ``{pairing_code}`` and may reference
+    ``{expires_at}`` (the code's ISO-8601 expiry), with no conversion or format spec;
+    ``pairing_link_unavailable`` when a redeem met a person being erased (its code is consumed,
+    so the reply asks for a new one); ``pairing_unlink_unavailable`` when ``/unlink`` met the
+    sender's person being erased; ``rejected_unsupported_type`` / ``rejected_too_large`` /
+    ``rejected_could_not_receive`` / ``rejected_unreadable`` / ``rejected_choice_unavailable``
+    are the notices for an inbound message the channel cannot bridge, a file over the cap, a
+    file the channel could not fetch, an inbound message whose body the channel could not read,
+    and a tap on a choice the channel can no longer read. Every member but
     ``pairing_code`` is literal text: a ``{`` in it is drawn as written. Each is a
     :data:`~tai42_contract.interactions.ReplyText` in the line's language; absent, the built-in
     English reply is sent. An empty catalogue names nothing and is refused; an unknown key is

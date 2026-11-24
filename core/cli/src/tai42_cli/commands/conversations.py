@@ -125,7 +125,7 @@ def create_route(
         typer.Option(
             "--reply-error",
             help=(
-                "Reply sent when a turn fails and the target gave no reply of its own. "
+                "Reply sent when a turn the participant sent fails and the target gave no reply of its own. "
                 "Unset sends the built-in English text."
             ),
         ),
