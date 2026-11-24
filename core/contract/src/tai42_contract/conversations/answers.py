@@ -32,8 +32,9 @@ from tai42_contract.interactions.models import (
     check_media_list,
 )
 
-#: A turn's outcome kind. ``answered``/``error`` carry answer text (``error`` is generic
-#: client-safe text only); ``silent`` is a deliberate no-reply and carries NO answer text.
+#: A turn's outcome kind. ``answered`` carries answer text; ``error`` carries generic client-safe
+#: text, or none when the failed turn was not the participant's own and the target gave no reply;
+#: ``silent`` is a deliberate no-reply and carries NO answer text.
 #: ``merged`` (this message's text was carried into a later turn) and ``superseded`` (this
 #: message was dropped in favour of a later turn) are answerless too and each name that turn
 #: through ``successor_id``.
@@ -262,7 +263,9 @@ class ConversationAnswer(BaseModel):
 
     ``message_id`` correlates it to the ``202``/``200`` the door returned. On
     ``status="error"`` the ``answer`` is generic client-safe text, never an internal
-    detail. On ``status="silent"`` the turn produced no reply and ``answer`` is absent.
+    detail, or absent (with no ``parts``) when the turn was not the participant's own and the
+    target gave no reply; the record keeps the detail. On ``status="silent"`` the turn produced
+    no reply and ``answer`` is absent.
 
     ``parts`` is the ordered list of :class:`AnswerPart` messages the turn produced when a
     single joined string would lose something — more than one message, or one message
@@ -296,18 +299,23 @@ class ConversationAnswer(BaseModel):
 
     @model_validator(mode="after")
     def _answer_matches_status(self) -> ConversationAnswer:
-        """``answered``/``error`` carry answer text; ``silent``/``merged``/``superseded`` carry none.
+        """``answered`` carries answer text; ``error`` carries it or nothing; the answerless carry none.
 
         The text is a string, possibly EMPTY for an all-media answer whose ``parts`` carry the
         content. A blank ``answer`` is admissible on ``answered``/``error`` ONLY when ``parts`` is
-        present — otherwise there is nothing to deliver.
+        present — otherwise there is nothing to deliver. An ``error`` with no ``answer`` (a failed
+        turn owed no line) carries no ``parts`` either.
         """
         if self.status in ANSWERLESS_ANSWER_STATUSES:
             if self.answer is not None:
                 raise ValueError(f"a {self.status} answer carries no answer text")
             return self
+        if self.status == "error" and self.answer is None:
+            if self.parts is not None:
+                raise ValueError("an error answer with no answer text carries no parts")
+            return self
         if self.answer is None:
-            raise ValueError("an answered/error answer carries answer text (empty only for an all-media answer)")
+            raise ValueError("an answered answer carries answer text (empty only for an all-media answer)")
         if not self.answer.strip() and not self.parts:
             raise ValueError("an answered/error answer with blank text must carry media-only parts")
         return self

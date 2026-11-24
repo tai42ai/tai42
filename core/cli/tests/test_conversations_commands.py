@@ -573,7 +573,8 @@ def test_conversations_create_help_says_the_error_reply_yields_to_the_targets_ow
     result = run_cli(monkeypatch, handler, ["conversations", "create", "--help"])
     assert result.exit_code == 0, result.output
     assert (
-        "Reply sent when a turn fails and the target gave no reply of its own. Unset sends the built-in English text."
+        "Reply sent when a turn the participant sent fails and the target gave no reply of its own. "
+        "Unset sends the built-in English text."
     ) in visible(result.output)
 
 
