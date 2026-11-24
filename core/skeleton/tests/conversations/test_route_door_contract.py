@@ -163,9 +163,8 @@ async def test_agent_start_expr_owning_thread_id_is_refused(monkeypatch):
     _wire_agent(monkeypatch, route, agent)
 
     outcome = await _run_agent(route)
-    assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "error"
-    assert "start_expr error" in (outcome.error or "")
+    assert isinstance(outcome, outcome_module._FailedOutcome)
+    assert "start_expr error" in outcome.error
     assert agent.seen == []  # never driven
 
 
@@ -217,9 +216,8 @@ async def test_agent_resolving_caller_ask_inside_itself_fails_at_the_seam(monkey
     _wire_agent(monkeypatch, route, agent)
 
     outcome = await _run_agent(route)
-    assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "error"
-    error = outcome.error or ""
+    assert isinstance(outcome, outcome_module._FailedOutcome)
+    error = outcome.error
     assert "chat" in error
     assert "ask" in error
     assert "reply/resume" in error
@@ -238,9 +236,8 @@ async def test_agent_run_binding_ask_with_no_reply_resume_fails_fast_at_bind_tim
     _wire_agent(monkeypatch, route, agent)
 
     outcome = await _run_agent(route)
-    assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "error"
-    error = outcome.error or ""
+    assert isinstance(outcome, outcome_module._FailedOutcome)
+    error = outcome.error
     assert "chat" in error  # the route
     assert "ask" in error  # the tool
     assert "reply/resume" in error
@@ -271,7 +268,6 @@ async def test_agent_reply_expr_maps_the_structured_final(monkeypatch):
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == "the mapped reply"
 
 
@@ -299,7 +295,6 @@ async def test_agent_resume_message_terminal_no_reply_expr(monkeypatch):
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == "the resumed answer"
 
 
@@ -312,7 +307,6 @@ async def test_agent_resume_message_terminal_reply_expr(monkeypatch):
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == "mapped resume text"
 
 
@@ -326,7 +320,6 @@ async def test_agent_resume_structured_terminal_no_reply_expr(monkeypatch):
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == json.dumps({"answer": "structured resume"})
 
 
@@ -339,7 +332,6 @@ async def test_agent_resume_structured_terminal_reply_expr(monkeypatch):
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == "the mapped resume reply"
 
 
@@ -355,9 +347,8 @@ async def test_agent_start_is_refused_while_a_caller_ask_is_pending(monkeypatch)
     monkeypatch.setattr(agent_turn_module, "list_parked", _pending)
 
     outcome = await _run_agent(route)
-    assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "error"
-    assert "pending" in (outcome.error or "")
+    assert isinstance(outcome, outcome_module._FailedOutcome)
+    assert "pending" in outcome.error
     assert agent.seen == []  # the start never ran
 
 
@@ -382,7 +373,6 @@ async def test_agent_start_runs_after_the_visit_cancels_the_pending_caller_ask(m
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
     assert len(visits) == 1
     assert visits[0]["cancel"] == ["i-1"]
     assert visits[0]["start"] is not None
@@ -410,7 +400,6 @@ async def test_agent_route_extras_expr_declared_key_runs(monkeypatch):
 
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status != "error"
     assert len(agent.seen) == 1
 
 
@@ -422,11 +411,10 @@ async def test_agent_route_extras_expr_undeclared_key_surfaces_the_refusal(monke
     _wire_agent_declaring_extras(monkeypatch, route, agent)
 
     outcome = await _run_agent(route)
-    assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "error"
-    assert "turn error" in (outcome.error or "")
+    assert isinstance(outcome, outcome_module._FailedOutcome)
+    assert "turn error" in outcome.error
     # The refusal names the undeclared key, so no unrelated fault can satisfy this assertion.
-    assert "nope" in (outcome.error or "")
+    assert "nope" in outcome.error
     assert agent.seen == []
 
 
@@ -473,7 +461,5 @@ async def test_agent_turn_on_the_shipped_checkpoint_default_with_no_store_return
     _wire_agent(monkeypatch, route, agent)
     outcome = await _run_agent(route)
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.error is None
-    assert outcome.answer_status == "answered"
     assert outcome.parts[0].message == "the agent reply"
     assert [seen["thread_id"] for seen in agent.seen] == ["bridge:chat:+15550002222"]

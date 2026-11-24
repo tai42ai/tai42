@@ -12,6 +12,7 @@ import inspect
 import json
 import logging
 import time
+from typing import Literal
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, ChannelInputError, ChannelTemplate, SendOutcome
@@ -447,9 +448,17 @@ async def test_a_refusal_notice_that_fails_is_logged_and_leaves_the_record_faile
     )
 
 
-def _unrenderable_record(message_id: str, *, operator_send: bool, caller_principal: str | None) -> ConversationRecord:
+def _unrenderable_record(
+    message_id: str,
+    *,
+    operator_send: bool,
+    caller_principal: str | None,
+    origin: Literal["client", "operator", "send"] = "operator",
+    inbound_kind: Literal["message", "event"] = "message",
+    inbound_event: dict | None = None,
+) -> ConversationRecord:
     """A channel record carrying a media part a text-only channel cannot render — the refusal
-    fixture for the notice-vs-no-notice boundary between an operator hand-send and a turn reply."""
+    fixture for the notice-vs-no-notice boundary between a turn the participant sent and one they did not."""
     now = time.time()
     part = AnswerPart(message="pic", media=[MediaItem(kind=MediaKind.IMAGE, url="https://cdn.example/i.png")])
     return ConversationRecord(
@@ -460,9 +469,11 @@ def _unrenderable_record(message_id: str, *, operator_send: bool, caller_princip
         client_address="+15550002222",
         channel="twilio",
         our_identity="+15550001111",
-        origin="operator",
+        origin=origin,
         operator_send=operator_send,
         caller_principal=caller_principal,
+        inbound_kind=inbound_kind,
+        inbound_event=inbound_event,
         inbound_text="",
         answer_status="answered",
         answer="pic",
@@ -502,6 +513,49 @@ async def test_a_completion_delivered_reply_refusal_notifies_the_participant(mon
     assert (await _get(store, "m-cmpl")).delivery_status is DeliveryStatus.FAILED
     # The media answer never went out; the ONE send is the uniform could-not-deliver notice.
     assert channel.sends == [outcome_module._ERROR_ANSWER_TEXT]
+
+
+async def test_an_event_turn_reply_refusal_sends_no_participant_notice(monkeypatch, fake, store, caplog):
+    """A turn the participant did not send (an event) earns no could-not-deliver notice when its
+    ready reply is refused: the record fails loudly and the refusal is logged at ERROR."""
+    await create_record(
+        store,
+        _unrenderable_record(
+            "m-event",
+            operator_send=False,
+            caller_principal="svc-int",
+            origin="client",
+            inbound_kind="event",
+            inbound_event={"event_id": "evt-1", "kind": "provider.update", "payload": {}},
+        ),
+    )
+    channel = FakeChannel("w1")  # text-only: no supports_media_notifications
+    _wire_channel(monkeypatch, channel)
+
+    with caplog.at_level(logging.ERROR):
+        await delivery_channel_module._deliver_channel(store, await _get(store, "m-event"), "worker-1")
+
+    assert (await _get(store, "m-event")).delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
+    assert any(r.levelno == logging.ERROR and "m-event" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_completion_reply_to_an_event_turn_refusal_sends_no_participant_notice(monkeypatch, fake, store):
+    """A park-completion reply that answers an event turn is no answer to anything the participant
+    sent, so its refusal sends no notice either; the record fails loudly."""
+    await create_record(
+        store,
+        _unrenderable_record(
+            "m-cmpl-event", operator_send=False, caller_principal="system:agent-resume", inbound_kind="event"
+        ),
+    )
+    channel = FakeChannel("w1")  # text-only: no supports_media_notifications
+    _wire_channel(monkeypatch, channel)
+
+    await delivery_channel_module._deliver_channel(store, await _get(store, "m-cmpl-event"), "worker-1")
+
+    assert (await _get(store, "m-cmpl-event")).delivery_status is DeliveryStatus.FAILED
+    assert channel.sends == []
 
 
 async def test_a_refusal_notice_falls_back_and_logs_when_the_route_lookup_faults(monkeypatch, fake, store, caplog):

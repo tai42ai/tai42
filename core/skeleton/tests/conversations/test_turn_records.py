@@ -24,9 +24,7 @@ def test_with_greeting_prepends_a_leading_part():
     # A due first-contact greeting is its OWN leading message ahead of the turn's parts (the
     # joined answer reads "greeting\n\nanswer").
     outcome = outcome_module._ResolvedOutcome(
-        answer_status="answered",
         parts=[outcome_module._text_part("first"), outcome_module._text_part("second")],
-        error=None,
     )
     greeted = pairing_module._with_greeting(outcome, "Welcome!")
     assert isinstance(greeted, outcome_module._ResolvedOutcome)

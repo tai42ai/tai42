@@ -368,7 +368,11 @@ async def test_the_agent_completion_creates_and_refreshes_in_one_script(env, sit
 
     with delivery_fire("c-agent"):
         await turn_module.deliver_agent_completion(
-            thread_id=_THREAD, completion_id="c-agent", result="done", status=PARK_COMPLETION_SUCCEEDED
+            thread_id=_THREAD,
+            inbound_kind="message",
+            completion_id="c-agent",
+            result="done",
+            status=PARK_COMPLETION_SUCCEEDED,
         )
     await _settle()
 
@@ -383,6 +387,7 @@ async def test_the_tool_completion_creates_and_refreshes_in_one_script(env, site
     with delivery_fire("c-tool"):
         await turn_module.deliver_tool_completion(
             thread_id="bridge:tool-line:+15550002222",
+            inbound_kind="message",
             completion_id="c-tool",
             result={"result": {"reply": "done"}},
             status=PARK_COMPLETION_SUCCEEDED,

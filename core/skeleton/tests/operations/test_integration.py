@@ -150,7 +150,12 @@ def test_disabled_api_tools_still_fires_the_completion_continuation_via_run_tool
                 with delivery_fire("cmpl-x"):
                     out = await app.tools.run_tool(
                         "conversation_deliver",
-                        {"thread_id": "bridge:line:+15550002222", "result": "hi", "completion_id": "cmpl-x"},
+                        {
+                            "thread_id": "bridge:line:+15550002222",
+                            "result": "hi",
+                            "completion_id": "cmpl-x",
+                            "inbound_kind": "message",
+                        },
                     )
             finally:
                 reset_execution_identity(token)

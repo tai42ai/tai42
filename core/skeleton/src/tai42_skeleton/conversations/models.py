@@ -35,7 +35,8 @@ class DeliveryStatus(StrEnum):
     out-of-band receipt or grace expiry; ``delivered``/``failed``/``shed``/``silent``/
     ``merged``/``superseded`` are terminal and are the only states carrying the retention
     TTL. ``shed`` ran no turn and never sends; ``silent`` ran a tool turn whose reply mapped
-    to nothing and so, by design, sends nothing; ``delivered`` on an api record without a
+    to nothing and so, by design, sends nothing, or a turn the participant did not send that
+    failed with no reply (``answer_status`` ``error``, nothing sent); ``delivered`` on an api record without a
     callback means the answer is readable at the message door and nothing was sent. ``merged``
     and ``superseded`` are the channel-door terminal states of an overlap outcome — a message
     whose text was carried into a later turn (``merged``) or dropped in favour of one
@@ -303,19 +304,22 @@ class ConversationRecord(BaseModel):
     # a structured turn entered on an existing thread, carrying no human text.
     inbound_kind: Literal["message", "event"] = "message"
     # The structured event payload an ``event`` turn ran on (a ``ConversationEvent`` dump),
-    # stored as opaque untrusted data. Present exactly on an ``event`` record; ``None`` on
-    # every ``message`` record.
+    # stored as opaque untrusted data. Required on a ``client`` event record; ``None`` on every
+    # ``message`` record and every ``operator`` record (a completion record answering an event
+    # turn carries ``inbound_kind="event"`` and no payload).
     inbound_event: dict[str, Any] | None = None
     # The principal that AUTHORIZED this record's turn — provenance only, never a key
     # segment and never used to key a thread. An event turn records its authorizing caller
     # here; ``None`` when no distinct authorizer applies.
     submitted_by: str | None = None
 
-    # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``,
-    # channel-door ``silent``); set on every state carrying one.
+    # ``None`` exactly while the record carries no turn outcome (``accepted``, ``shed``, a
+    # designed channel-door ``silent``, a channel-door overlap terminal); set on every state
+    # carrying one. A channel-door ``silent`` record carries ``error`` when it is a failure owed
+    # no line.
     answer_status: AnswerStatus | None = None
-    # Client-facing text; ``None`` for a ``silent`` outcome, and for an ``error`` turn the
-    # internal detail lives in ``error``.
+    # Client-facing text; ``None`` for a ``silent`` outcome and for an ``error`` outcome owed no
+    # line. For an ``error`` outcome the internal detail lives in ``error``.
     answer: str | None = None
     # The ordered rich :class:`AnswerPart` messages the turn produced when a single joined
     # string would lose something (more than one message, or one carrying media/options/a
@@ -375,22 +379,37 @@ class ConversationRecord(BaseModel):
         """A record carries a turn outcome exactly when its status says it has one.
 
         So nothing reaching the delivery machine can be missing the outcome it
-        must send. An ``answered``/``error`` outcome carries answer text — a
-        string, EMPTY only for an all-media answer whose ``answer_parts`` carry
-        the content, in which case ``answer_parts`` must be present. A ``silent``
-        one (an api-door no-reply the delivery machine still marks) carries none.
+        must send. An ``answered`` outcome carries answer text — a string, EMPTY
+        only for an all-media answer whose ``answer_parts`` carry the content, in
+        which case ``answer_parts`` must be present. An ``error`` outcome carries
+        the same, or no answer at all when the failed turn is owed no line: then
+        it sends nothing — terminal ``silent`` on the channel door, a marker with
+        no answer on the api door. A terminal ``silent`` record carries either no
+        outcome (a designed no-reply) or that answerless ``error``. A ``silent``
+        outcome (an api-door no-reply the delivery machine still marks) carries no
+        answer text.
         """
         answerless = self.delivery_status in ANSWERLESS_STATUSES
-        if answerless != (self.answer_status is None):
+        silent_error = self.delivery_status is DeliveryStatus.SILENT and self.answer_status == "error"
+        if not silent_error and answerless != (self.answer_status is None):
             raise ValueError(
                 f"delivery_status {self.delivery_status.value!r} and answer_status "
                 f"{self.answer_status!r} disagree on whether this record carries an outcome"
             )
-        if self.answer_status in ("answered", "error"):
-            if self.answer is None:
-                raise ValueError("an answered/error record carries answer text (empty only for an all-media answer)")
-            if not self.answer.strip() and not self.answer_parts:
-                raise ValueError("an answered/error record with blank answer text must carry media-only answer_parts")
+        if self.answer_status == "answered" and self.answer is None:
+            raise ValueError("an answered record carries answer text (empty only for an all-media answer)")
+        if self.answer_status == "error" and self.answer is None:
+            if self.door == "channel" and self.delivery_status is not DeliveryStatus.SILENT:
+                raise ValueError("a channel-door error with no answer text is silent, never delivered")
+        elif silent_error:
+            raise ValueError("a silent error record carries no answer text")
+        if (
+            self.answer_status in ("answered", "error")
+            and self.answer is not None
+            and not self.answer.strip()
+            and not self.answer_parts
+        ):
+            raise ValueError("an answered/error record with blank answer text must carry media-only answer_parts")
         if self.answer_status == "silent" and self.answer is not None:
             raise ValueError("a silent record carries no answer text")
         if self.delivery_status in SEND_ONLY_STATUSES and self.origin != "send":
@@ -413,8 +432,8 @@ class ConversationRecord(BaseModel):
             return self
         if not self.answer_parts:
             raise ValueError("answer_parts must be a non-empty list when present")
-        if self.answer_status not in ("answered", "error"):
-            raise ValueError("only an answered/error record carries answer_parts")
+        if self.answer_status not in ("answered", "error") or self.answer is None:
+            raise ValueError("only an answered/error record with answer text carries answer_parts")
         if joined_answer_text(self.answer_parts) != (self.answer or ""):
             raise ValueError("answer must equal the non-blank answer_parts messages joined with a blank line")
         return self
@@ -445,12 +464,11 @@ class ConversationRecord(BaseModel):
         """A ``client`` record answers a non-blank inbound; an ``operator`` or ``send`` record carries none.
 
         Only a ``send`` record carries ``sent_by``, ``turn_message_id`` and the ask fields. An
-        ``operator`` record carries no inbound (``""``) and is always an
-        ``answered`` outcome with non-blank answer text — it IS the operator's
-        reply, sent into the thread with no turn to run. An ``event`` inbound is a
-        structured ``client`` turn with no human text: it carries its
-        ``inbound_event`` and an empty ``inbound_text``, while a ``message``
-        inbound carries no ``inbound_event``.
+        ``operator`` record carries no inbound (``""``, no ``inbound_event``): a hand send is always
+        an ``answered`` message, and a completion record carries its turn's ``inbound_kind`` and an
+        ``answered`` or ``error`` outcome. A ``client`` event record is a structured turn with no
+        human text: it carries its ``inbound_event`` and an empty ``inbound_text``. A ``message``
+        record never carries an ``inbound_event``.
         """
         if self.origin != "send" and (
             self.sent_by is not None
@@ -463,6 +481,7 @@ class ConversationRecord(BaseModel):
             self._check_send_fields()
         elif self.origin == "operator":
             self._check_operator_inbound()
+            self._check_operator_outcome()
         elif self.inbound_kind == "event":
             self._check_event_inbound()
         elif not self.inbound_text.strip():
@@ -472,12 +491,7 @@ class ConversationRecord(BaseModel):
         return self
 
     def _check_operator_inbound(self) -> None:
-        """An operator record is a message send carrying no inbound (text/form/media/event).
-
-        It is always an ``answered`` outcome that names the operator that sent it.
-        """
-        if self.inbound_kind != "message":
-            raise ValueError("an operator record is a message send, never an event")
+        """An operator record carries no inbound: no text, form, media, quote or event payload."""
         if self.inbound_text != "":
             raise ValueError("an operator record carries no inbound_text (must be '')")
         if self.inbound_form is not None:
@@ -490,8 +504,24 @@ class ConversationRecord(BaseModel):
             )
         if self.inbound_reply_to is not None:
             raise ValueError("an operator record carries no inbound_reply_to (it answers, it does not submit)")
-        if self.answer_status != "answered":
-            raise ValueError(f"an operator record is always answered, got answer_status {self.answer_status!r}")
+        if self.inbound_event is not None:
+            raise ValueError("an operator record carries no inbound_event (it answers, it does not submit)")
+
+    def _check_operator_outcome(self) -> None:
+        """An operator record names who sent it, and its kind and outcome fit what produced it.
+
+        A hand send (``operator_send``) is always an ``answered`` message. A completion record (a
+        parked turn's late reply) carries the ``inbound_kind`` of the turn it answers, and an
+        ``error`` outcome when the parked run failed.
+        """
+        if self.operator_send and self.inbound_kind != "message":
+            raise ValueError("an operator hand send is a message send, never an event")
+        if self.operator_send and self.answer_status != "answered":
+            raise ValueError(
+                f"an operator record is always answered when sent by hand, got answer_status {self.answer_status!r}"
+            )
+        if not self.operator_send and self.answer_status not in ("answered", "error"):
+            raise ValueError(f"a completion record is answered or error, got answer_status {self.answer_status!r}")
         if not (self.caller_principal or "").strip():
             raise ValueError("an operator record must name the operator that sent it in caller_principal")
 

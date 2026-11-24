@@ -262,11 +262,26 @@ class RecordWriteMixin(RecordStoreBase):
                 )
             )
 
+    async def complete_record(self, record: ConversationRecord) -> int:
+        """Move an intake record to the completed ``record``'s outcome by the transition its status takes.
+
+        A terminal ``silent`` record takes :meth:`complete_silent`, a terminal ``superseded`` one
+        :meth:`supersede_record`, and every other completed record (``pending_delivery``) takes
+        :meth:`complete_turn`. Returns that transition's guarded write count: 1 transitioned, 0 no
+        longer at intake, -1 gone.
+        """
+        if record.delivery_status is DeliveryStatus.SILENT:
+            return await self.complete_silent(record)
+        if record.delivery_status is DeliveryStatus.SUPERSEDED:
+            return await self.supersede_record(record)
+        return await self.complete_turn(record)
+
     async def complete_silent(self, record: ConversationRecord) -> int:
         """Move an intake record from ``accepted`` straight to terminal ``silent``, applying the retention TTL.
 
-        A tool turn that produced no reply. Returns 1 transitioned, 0 no longer at intake, -1 gone. Guarded
-        on the current status, so a late turn and a re-drive cannot both write an outcome.
+        A turn that sends nothing: a designed silence, or a failed turn owed no line. Returns 1
+        transitioned, 0 no longer at intake, -1 gone. Guarded on the current status, so a late turn
+        and a re-drive cannot both write an outcome.
         """
         if record.delivery_status is not DeliveryStatus.SILENT:
             raise ValueError(f"complete_silent writes a silent record, got {record.delivery_status.value!r}")

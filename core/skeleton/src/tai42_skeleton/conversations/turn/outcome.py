@@ -1,8 +1,9 @@
 """The internal turn-outcome value types and their constructors.
 
-A turn resolves to exactly one of a silent no-reply or a produced (answered/error)
-outcome; these are the two shapes plus the helpers that build an answer part, the
-client-safe error text, a target failure's reply, and the serialized form of an agent's structured final.
+A turn resolves to exactly one of a silent no-reply, an answered reply, a failure, or a
+yield to a newer turn; these are the shapes plus the helpers that build an answer part, the
+client-safe error text, the line a failed turn delivers, and the serialized form of an agent's
+structured final.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ class _SilentOutcome:
 
 @dataclass(frozen=True)
 class _ResolvedOutcome:
-    """A turn that produced an outcome to deliver: an ``answered`` reply or a client-safe ``error``.
+    """A turn that produced an ``answered`` reply to deliver.
 
     ``parts`` is the ORDERED, non-empty list of rich :class:`AnswerPart` messages the turn
     produced — one for a single-message answer, several for an ordered multi-message one (a tool
@@ -56,9 +57,7 @@ class _ResolvedOutcome:
     joined with a blank line — the whole-text form every plain-text reader consumes.
     """
 
-    answer_status: Literal["answered", "error"]
     parts: list[AnswerPart]
-    error: str | None
 
     @property
     def answer(self) -> str:
@@ -69,6 +68,22 @@ class _ResolvedOutcome:
         outcome joins to ``""``.
         """
         return joined_answer_text(self.parts)
+
+
+@dataclass(frozen=True, slots=True)
+class _FailedOutcome:
+    """A turn that ended failed.
+
+    ``error`` is the internal detail kept on the record and in the logs; ``reply`` is the target's
+    own participant-facing text (``RunTerminalFailed.reply``), ``None`` when the target gave none.
+    ``leading_parts`` are messages delivered ahead of the failure line (an owed first-contact
+    greeting). What, if anything, the participant reads is resolved by :func:`failure_line`
+    against the route and who sent the turn, never here.
+    """
+
+    error: str
+    reply: str | None
+    leading_parts: tuple[AnswerPart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,7 +100,7 @@ class _SupersededOutcome:
 
 
 #: A tool turn resolves to exactly one of these shapes — no coercible in-between.
-_ToolOutcome = _SilentOutcome | _ResolvedOutcome | _SupersededOutcome
+_ToolOutcome = _SilentOutcome | _ResolvedOutcome | _FailedOutcome | _SupersededOutcome
 
 
 def _text_part(text: str) -> AnswerPart:
@@ -123,35 +138,36 @@ def _error_answer_text(route: ConversationRoute | None) -> str:
     return reply_text(route, "error", _ERROR_ANSWER_TEXT)
 
 
-def _failure_answer_text(route: ConversationRoute | None, reply: str | None) -> str:
-    """The participant-facing text for a target's terminal failure.
+def failure_line(
+    route: ConversationRoute | None, outcome: _FailedOutcome, *, inbound_kind: Literal["message", "event"]
+) -> str | None:
+    """The text a failed turn delivers to the participant, ``None`` when nothing is delivered.
 
-    The target's ``reply`` when the failure carries one
-    (:class:`~tai42_contract.interactions.RunTerminalFailed` / ``RunFailed`` ``reply``), shown as
-    the target wrote it; else the platform's fixed text (:func:`_error_answer_text`: the route's
-    ``reply_texts.error``, else the built-in line). The failure's internal detail is never part of
-    this text.
+    The target's own ``reply`` is always delivered: a consumer that speaks on failure is heard
+    whoever sent the turn. The platform's fixed sentence (:func:`_error_answer_text`) is owed only
+    to a turn the participant sent (``inbound_kind == "message"``: a text, media or form turn); a
+    provider or system notice (``"event"``) that fails with no reply is answered with nothing, and
+    the failure stays on the record and in the logs.
     """
-    return reply if reply is not None else _error_answer_text(route)
+    if outcome.reply is not None:
+        return outcome.reply
+    if inbound_kind == "message":
+        return _error_answer_text(route)
+    return None
 
 
-def _tool_error(detail: str, route: ConversationRoute | None = None) -> _ResolvedOutcome:
-    return _ResolvedOutcome(answer_status="error", parts=[_text_part(_error_answer_text(route))], error=detail)
+def _tool_error(detail: str) -> _FailedOutcome:
+    return _FailedOutcome(error=detail, reply=None)
 
 
-def _terminal_failure(exc: RunTerminalFailed, route: ConversationRoute | None) -> _ResolvedOutcome:
-    """The ``error`` outcome of a turn whose target RAISED a terminal failure.
+def _terminal_failure(exc: RunTerminalFailed) -> _FailedOutcome:
+    """The failed outcome of a turn whose target RAISED a terminal failure.
 
-    The answer is :func:`_failure_answer_text` (the target's reply, else the fixed text); the
-    record's ``error`` is the opaque outcome rendered whole by :func:`failed_outcome_detail`, never
-    read key by key.
+    It carries the target's ``reply``; the ``error`` detail is the opaque outcome rendered whole by
+    :func:`failed_outcome_detail`, never read key by key.
     """
-    return _ResolvedOutcome(
-        answer_status="error",
-        parts=[_text_part(_failure_answer_text(route, exc.reply))],
-        error=failed_outcome_detail(exc.outcome),
-    )
+    return _FailedOutcome(error=failed_outcome_detail(exc.outcome), reply=exc.reply)
 
 
 def _pairing_reply(text: str) -> _ResolvedOutcome:
-    return _ResolvedOutcome(answer_status="answered", parts=[_text_part(text)], error=None)
+    return _ResolvedOutcome(parts=[_text_part(text)])

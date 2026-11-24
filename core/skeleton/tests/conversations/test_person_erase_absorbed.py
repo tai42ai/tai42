@@ -547,7 +547,11 @@ async def _park_completes(world: World, monkeypatch, thread: str, completion_id:
     monkeypatch.setattr(completion_delivery_module, "spawn_delivery", lambda message_id: None)
     with delivery_fire(completion_id):
         out = await completion_delivery_module.deliver_agent_completion(
-            thread_id=thread, result="done", completion_id=completion_id, status=PARK_COMPLETION_SUCCEEDED
+            thread_id=thread,
+            inbound_kind="message",
+            result="done",
+            completion_id=completion_id,
+            status=PARK_COMPLETION_SUCCEEDED,
         )
     assert out == {"message_id": completion_id}
     return completion_id

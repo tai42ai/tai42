@@ -316,6 +316,7 @@ async def test_a_late_tool_reply_reads_the_window_fresh(env, monkeypatch):
     with delivery_fire("c-late"):
         out = await turn_module.deliver_tool_completion(
             thread_id=f"bridge:tool-line:{CLIENT}",
+            inbound_kind="message",
             completion_id="c-late",
             result={"x": 1},
             status=PARK_COMPLETION_SUCCEEDED,
@@ -340,6 +341,7 @@ async def test_a_late_agent_reply_reads_the_window_fresh(env, monkeypatch):
     with delivery_fire("c-late"):
         out = await turn_module.deliver_agent_completion(
             thread_id=f"bridge:line:{CLIENT}",
+            inbound_kind="message",
             completion_id="c-late",
             result={"final": "done"},
             status=PARK_COMPLETION_SUCCEEDED,
@@ -369,6 +371,7 @@ async def test_a_late_read_fault_delivers_the_client_safe_notice(env, monkeypatc
     with caplog.at_level(logging.ERROR, logger=_TURN_LOGGER), delivery_fire("c-fault"):
         out = await deliver(
             thread_id=f"bridge:{route.route_name}:{CLIENT}",
+            inbound_kind="message",
             completion_id="c-fault",
             result={"x": 1},
             status=PARK_COMPLETION_SUCCEEDED,

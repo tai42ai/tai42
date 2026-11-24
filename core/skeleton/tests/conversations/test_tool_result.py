@@ -392,6 +392,7 @@ async def test_a_parked_typed_value_binds_completion_and_delivers_on_resume(env,
     with delivery_fire("c-resume"):
         out = await turn_module.deliver_tool_completion(
             thread_id=thread_id,
+            inbound_kind="message",
             completion_id="c-resume",
             result={"result": {"outputs": {"compose_messages": "your quote is ready"}}},
             status=PARK_COMPLETION_SUCCEEDED,

@@ -124,11 +124,14 @@ async def _fire(
     thread_id: str | None, result: object, completion_id: str, status: str | None = PARK_COMPLETION_SUCCEEDED
 ):
     """Drive the delivery tool exactly as a resuming driver does: inside the platform's delivery-fire
-    context (as the ladder sets it), the bound completion context (``{thread_id}``) merged with the
-    terminal outcome ``{result, completion_id, status}`` — the generic payload shape the contract pins."""
+    context (as the ladder sets it), the bound completion context (``{thread_id, inbound_kind}``,
+    a message turn here) merged with the terminal outcome ``{result, completion_id, status}`` — the
+    generic payload shape the contract pins."""
     context = {} if thread_id is None else {"thread_id": thread_id}
     with delivery_fire(completion_id):
-        return await deliver_agent_completion(**context, result=result, completion_id=completion_id, status=status)
+        return await deliver_agent_completion(
+            **context, inbound_kind="message", result=result, completion_id=completion_id, status=status
+        )
 
 
 async def test_completion_delivers_the_resumed_answer_into_the_thread(env, monkeypatch):
@@ -181,12 +184,13 @@ async def test_completion_empty_result_delivers_error_reply(env, monkeypatch):
     await _settle()
 
     # A resumed run that produced no text delivers the SAME client-safe error reply text the
-    # fresh-turn path delivers for an empty answer — never a silent non-delivery. It rides the
-    # operator record as an answered reply (an operator record is always answered).
+    # fresh-turn path delivers for an empty answer — never a silent non-delivery — and the
+    # completion record keeps the failure as an ``error`` outcome with its detail.
     assert out == {"message_id": "cmpl-empty"}
     record = await _store().get_record("cmpl-empty")
     assert record is not None
-    assert record.answer_status == "answered"
+    assert record.answer_status == "error"
+    assert record.error == "the resumed run's answer was blank"
     assert record.answer == "Sorry, something went wrong handling your message. Please try again."
     assert channel.sends[0].message == "Sorry, something went wrong handling your message. Please try again."
 
@@ -205,7 +209,7 @@ async def test_completion_empty_result_uses_the_route_reply_texts_error_when_set
     assert out == {"message_id": "cmpl-empty-es"}
     record = await _store().get_record("cmpl-empty-es")
     assert record is not None
-    assert record.answer_status == "answered"
+    assert record.answer_status == "error"
     assert record.answer == spanish
     assert channel.sends[0].message == spanish
 
@@ -222,6 +226,7 @@ async def test_completion_success_with_no_result_delivers_the_notice_and_warns(e
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER), delivery_fire("cmpl-no-result"):
         out = await deliver_agent_completion(
             thread_id="bridge:line:+15550002222",
+            inbound_kind="message",
             completion_id="cmpl-no-result",
             status=PARK_COMPLETION_SUCCEEDED,
         )
@@ -230,6 +235,8 @@ async def test_completion_success_with_no_result_delivers_the_notice_and_warns(e
     assert out == {"message_id": "cmpl-no-result"}
     record = await _store().get_record("cmpl-no-result")
     assert record is not None
+    assert record.answer_status == "error"
+    assert record.error == "the resumed run reported success with no result"
     assert record.answer == outcome_module._ERROR_ANSWER_TEXT
     assert record.answer != "null"
     assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
@@ -294,7 +301,9 @@ async def test_completion_non_success_delivers_the_uniform_error_notice(env, mon
     assert out == {"message_id": "cmpl-fail"}
     record = await _store().get_record("cmpl-fail")
     assert record is not None
-    assert record.answer_status == "answered"
+    assert record.answer_status == "error"
+    assert record.error is not None
+    assert "boom: internal stack" in record.error
     assert record.answer == outcome_module._ERROR_ANSWER_TEXT
     assert [n.message for n in channel.sends] == [outcome_module._ERROR_ANSWER_TEXT]
     # The internal detail never reaches the client.
@@ -329,7 +338,10 @@ async def test_completion_unstamped_fire_delivers_the_notice_and_warns(env, monk
 
     with caplog.at_level(logging.WARNING, logger=_TURN_LOGGER), delivery_fire("cmpl-unstamped"):
         out = await deliver_agent_completion(
-            thread_id="bridge:line:+15550002222", result="would-deliver-if-success", completion_id="cmpl-unstamped"
+            thread_id="bridge:line:+15550002222",
+            inbound_kind="message",
+            result="would-deliver-if-success",
+            completion_id="cmpl-unstamped",
         )
     await _settle()
 
@@ -395,7 +407,7 @@ async def test_completion_without_a_bound_thread_is_a_logged_no_op(env, monkeypa
         # completion-id guard is — never a thread id the reversal would then reject.
         with delivery_fire("cmpl-blank-thread"):
             blank = await deliver_agent_completion(
-                thread_id="", result="also orphaned", completion_id="cmpl-blank-thread"
+                thread_id="", inbound_kind="message", result="also orphaned", completion_id="cmpl-blank-thread"
             )
     await _settle()
 
@@ -418,7 +430,7 @@ async def test_completion_without_a_completion_id_raises(env, monkeypatch):
     _wire(monkeypatch, FakeManager(_channel_route()), channel)
 
     with pytest.raises(ParkDeliveryUnauthorizedError):
-        await deliver_agent_completion(thread_id="bridge:line:+15550002222", result="hi")
+        await deliver_agent_completion(thread_id="bridge:line:+15550002222", inbound_kind="message", result="hi")
     assert channel.sends == []
 
 

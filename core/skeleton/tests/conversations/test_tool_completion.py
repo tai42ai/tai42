@@ -43,6 +43,7 @@ async def _fire_tool(**kw):
     missing/blank id is fired WITHOUT a context (the ladder never fires an id-less completion), so the
     guard refuses it.
     """
+    kw.setdefault("inbound_kind", "message")
     cid = kw.get("completion_id")
     if not isinstance(cid, str) or not cid:
         return await turn_module.deliver_tool_completion(**kw)
@@ -52,6 +53,7 @@ async def _fire_tool(**kw):
 
 async def _fire_agent(**kw):
     """Fire ``deliver_agent_completion`` inside the platform's delivery-fire context, as the ladder does."""
+    kw.setdefault("inbound_kind", "message")
     cid = kw.get("completion_id")
     if not isinstance(cid, str) or not cid:
         return await turn_module.deliver_agent_completion(**kw)
@@ -103,9 +105,9 @@ async def test_tool_route_park_binds_completion_and_delivers_via_reply_expr(env,
     thread_id = address.thread_id
     assert thread_id == "bridge:tool-line:+15550002222"
     # The ORIGINATING route is pinned into the completion context so the resumed outcome maps
-    # through THIS route's reply_expr, not the route a linked person last wrote from.
-    assert address.context is not None
-    assert address.context["route_name"] == "tool-line"
+    # through THIS route's reply_expr, not the route a linked person last wrote from; who sent the
+    # turn rides beside it, so a failed resume knows whether a line is owed.
+    assert address.context == {"route_name": "tool-line", "message_id": message_id, "inbound_kind": "message"}
 
     # The resumer drives to a clean terminal out of band and fires the completion; reply_expr
     # maps the terminal outcome and it is delivered back into the thread.
@@ -476,7 +478,7 @@ async def test_agent_route_park_binds_the_thread_as_the_completion_context(env, 
     # The address carries this turn's thread, and its context the intake ``message_id``, so the
     # late-path deliverer can rebuild ``$turn`` from the stored record.
     assert address.thread_id == "bridge:line:+15550002222"
-    assert address.context == {"message_id": message_id}
+    assert address.context == {"message_id": message_id, "inbound_kind": "message"}
 
     # The contract payload the platform fires — the bound context and the thread merged with the
     # terminal outcome — is exactly what the bound tool accepts, and it delivers the answer back.
@@ -510,6 +512,7 @@ async def test_completion_tools_refuse_outside_the_delivery_fire(env, monkeypatc
             completion_id="c-unauth",
             result={"result": {"reply": "hi"}},
             status=PARK_COMPLETION_SUCCEEDED,
+            inbound_kind="message",
         )
     with pytest.raises(ParkDeliveryUnauthorizedError):
         await turn_module.deliver_agent_completion(
@@ -517,6 +520,7 @@ async def test_completion_tools_refuse_outside_the_delivery_fire(env, monkeypatc
             completion_id="c-unauth-2",
             result="hi",
             status=PARK_COMPLETION_SUCCEEDED,
+            inbound_kind="message",
         )
     assert channel.sends == []
 
@@ -622,11 +626,17 @@ async def test_deliver_completion_withdrawn_is_refused_outside_the_delivery_fire
 
     with pytest.raises(ParkDeliveryUnauthorizedError):
         await turn_module.deliver_tool_completion(
-            thread_id="bridge:tool-line:+15550002222", completion_id="wd-unauth", status=PARK_COMPLETION_WITHDRAWN
+            thread_id="bridge:tool-line:+15550002222",
+            completion_id="wd-unauth",
+            status=PARK_COMPLETION_WITHDRAWN,
+            inbound_kind="message",
         )
     with pytest.raises(ParkDeliveryUnauthorizedError):
         await turn_module.deliver_agent_completion(
-            thread_id="bridge:tool-line:+15550002222", completion_id="wd-unauth-2", status=PARK_COMPLETION_WITHDRAWN
+            thread_id="bridge:tool-line:+15550002222",
+            completion_id="wd-unauth-2",
+            status=PARK_COMPLETION_WITHDRAWN,
+            inbound_kind="message",
         )
     assert channel.sends == []
 

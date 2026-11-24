@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 
 import pytest
@@ -502,7 +503,9 @@ async def _strand_event_record(store: ConversationRecordStore, fake: FakeRecordR
     fake.seed_hash(key, fields | {"intake_claim": f"dead-worker:{time.time() - 1}"})
 
 
-async def test_redrive_redrives_a_stranded_event_record_that_owns_its_claim(env, monkeypatch):
+async def test_redrive_fails_a_stranded_event_record_that_owns_its_claim_without_a_line(env, monkeypatch, caplog):
+    # An event turn is not the participant's own, so its stranded failure is recorded and logged
+    # but sends them nothing.
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
     store = _store()
@@ -511,14 +514,48 @@ async def test_redrive_redrives_a_stranded_event_record_that_owns_its_claim(env,
     # The record owns its event claim (a crashed worker that claimed before dying).
     assert await store.claim_event("tool-line", "evt-1", "stranded-event") == "stranded-event"
 
-    await turn_module.redrive_accepted()
-    await _settle()
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.turn"):
+        await turn_module.redrive_accepted()
+        await _settle()
 
     resolved = await store.get_record("stranded-event")
     assert resolved is not None
     assert resolved.answer_status == "error"
-    assert resolved.delivery_status is DeliveryStatus.DELIVERED
-    assert channel.sends  # the error outcome reached the thread's address
+    assert resolved.answer is None
+    assert resolved.error == "turn was interrupted before it produced an answer"
+    assert resolved.delivery_status is DeliveryStatus.SILENT
+    assert channel.sends == []
+    assert any(
+        r.levelno == logging.ERROR and "stranded-event" in r.getMessage() and "event" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+async def test_a_redrive_that_loses_the_guard_logs_no_unvoiced_failure(env, monkeypatch, caplog):
+    # The live turn resolved the record first, so the re-drive's error outcome is never stored and
+    # no ERROR line may describe it.
+    channel = FakeChannel()
+    _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
+    store = _store()
+    record = _accepted_event_record("raced-event")
+    await _strand_event_record(store, env, record)
+    assert await store.claim_event("tool-line", "evt-1", "raced-event") == "raced-event"
+
+    async def _lost_the_guard(self, completed):
+        return 0
+
+    monkeypatch.setattr(records_module.ConversationRecordStore, "complete_record", _lost_the_guard)
+
+    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.conversations.turn"):
+        await turn_module.redrive_accepted()
+        await _settle()
+
+    assert any(
+        r.levelno == logging.WARNING and "raced-event" in r.getMessage() and "left intake" in r.getMessage()
+        for r in caplog.records
+    )
+    assert not any("owes the participant no line" in r.getMessage() for r in caplog.records)
+    assert channel.sends == []
 
 
 async def test_redrive_discards_a_stranded_event_record_whose_claim_belongs_elsewhere(env, monkeypatch):

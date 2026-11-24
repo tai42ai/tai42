@@ -16,6 +16,7 @@ from tai42_skeleton.channels.inbound_events import (
     INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
 )
 from tai42_skeleton.channels.inbound_rejection import INBOUND_REJECTED_EVENT_TOPIC
+from tai42_skeleton.conversations.turn.failed_turn import TURN_FAILED_EVENT_TOPIC
 from tai42_skeleton.interactions.helper import DELIVERY_FAILED_EVENT_TOPIC
 from tai42_skeleton.interactions.reaper import (
     ASK_EXPIRED_UNANSWERED_EVENT_TOPIC,
@@ -30,6 +31,7 @@ PLATFORM_EVENT_TOPICS = (
     INBOUND_REJECTED_EVENT_TOPIC,
     INBOUND_MEDIA_INGESTED_EVENT_TOPIC,
     INBOUND_MEDIA_REJECTED_EVENT_TOPIC,
+    TURN_FAILED_EVENT_TOPIC,
     DELIVERY_FAILED_EVENT_TOPIC,
     ASK_EXPIRED_UNANSWERED_EVENT_TOPIC,
     KILL_ABANDONED_EVENT_TOPIC,
