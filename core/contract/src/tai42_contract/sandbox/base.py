@@ -182,15 +182,24 @@ class Sandbox(ABC):
     sandbox-agnostic; concrete providers (a container runtime, a direct-host
     runner) implement it and register via
     ``@tai42_app.sandboxes.register_sandbox``.
+
+    The provider owns the lifetime of every session object it returns: it holds a
+    strong reference to each one from :meth:`create_session` until
+    :meth:`destroy_session` or :meth:`reap` ends that session, and releases it then.
+    A consumer may therefore hold a returned session by weak reference and rely on
+    the provider keeping it alive until the session ends.
     """
 
     @abstractmethod
     async def create_session(self, spec: SandboxSessionSpec) -> SandboxSession:
-        """Create a session from ``spec`` or REJECT it with :class:`SandboxSpecRejectedError`."""
+        """Create a session from ``spec`` or REJECT it with :class:`SandboxSpecRejectedError`.
+
+        The provider holds the returned object until :meth:`destroy_session` or :meth:`reap` ends the session.
+        """
 
     @abstractmethod
     async def get_session(self, session_id: str) -> SandboxSession:
-        """Fetch a live session by id.
+        """Fetch a live session by id: the same object :meth:`create_session` returned for it.
 
         Raise :class:`SandboxSessionNotFoundError` if absent.
         """
@@ -201,11 +210,11 @@ class Sandbox(ABC):
 
     @abstractmethod
     async def destroy_session(self, session_id: str) -> None:
-        """Tear a session down. Idempotent on an already-gone session."""
+        """Tear a session down and release the provider's hold on its object. Idempotent on an already-gone session."""
 
     @abstractmethod
     async def reap(self) -> list[str]:
-        """Destroy every session past its ``expires_at`` and return the destroyed ids."""
+        """Destroy every session past its ``expires_at``, releasing each one's object, and return the destroyed ids."""
 
     @property
     @abstractmethod
