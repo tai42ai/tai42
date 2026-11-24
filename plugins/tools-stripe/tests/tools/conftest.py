@@ -149,7 +149,7 @@ def stripe_env(monkeypatch: pytest.MonkeyPatch, interactions_facet: Any) -> Iter
     import os
 
     for key in list(os.environ):
-        if key.startswith("STRIPE_") or key in ("TAI_BRIDGE_CALLBACK_SECRET", "INTERACTIONS_PUBLIC_BASE_URL"):
+        if key.startswith("STRIPE_") or key in ("TAI_BRIDGE_CALLBACK_SECRET", "TAI_PUBLIC_BASE_URL"):
             monkeypatch.delenv(key, raising=False)
 
     def configure(

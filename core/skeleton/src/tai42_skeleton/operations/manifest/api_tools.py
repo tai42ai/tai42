@@ -9,7 +9,8 @@ from tai42_contract.app.responses import ApplyResponse
 from tai42_skeleton.app.boot_rules import translate_config_invariants
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, NotFoundError, operation
-from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
+from tai42_skeleton.operations._broadcast import apply_response
+from tai42_skeleton.operations.errors import translate_orphan_env_write
 
 from .models import ApiToolsListsUpdate
 

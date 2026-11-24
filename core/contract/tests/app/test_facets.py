@@ -147,10 +147,11 @@ EXPECTED_FACADE = {
     # extensions (2)
     "extension",
     "available_extensions",
-    # http (5)
+    # http (6)
     "middleware",
     "custom_route",
     "mount_base",
+    "public_base_url",
     "use_raw_path_key",
     "hosted_ui",
     # clients (1)
@@ -374,11 +375,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 180 (sub-protocol, member) pairs over 176 distinct names — ``store`` is exposed
+    # 181 (sub-protocol, member) pairs over 177 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 176, f"union={len(union)}"
-    assert total == 180 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 177, f"union={len(union)}"
+    assert total == 181 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_six_namespaces():
@@ -669,6 +670,14 @@ def test_mount_base_is_a_zero_arg_str_query():
     sig = inspect.signature(AppHttp.mount_base)
     assert list(sig.parameters) == ["self"]
     assert sig.return_annotation == "str"
+
+
+def test_public_base_url_is_a_zero_arg_optional_str_query():
+    from tai42_contract.app import AppHttp
+
+    sig = inspect.signature(AppHttp.public_base_url)
+    assert list(sig.parameters) == ["self"]
+    assert sig.return_annotation == "str | None"
 
 
 def test_hosted_ui_is_a_zero_arg_query_of_the_declared_paths():

@@ -17,6 +17,8 @@ from tai42_contract.access_control.identity import AuthIdentity, IdentityProvide
 from tai42_kit.access_control import registry
 from tai42_kit.settings import reset_all_settings
 
+from .._helpers import set_public_base_url
+
 ISSUER = "https://issuer.example/realm"
 STATIC_TOKEN = "door-static-token"
 STATIC_USER = "door-user"
@@ -51,12 +53,8 @@ def register_declaring_provider(provider: DeclaringTokenProvider) -> None:
 
 @contextmanager
 def public_base_url(monkeypatch: pytest.MonkeyPatch, value: str | None) -> Iterator[None]:
-    """Set (or unset) ``ACCESS_CONTROL_PUBLIC_BASE_URL`` for the block."""
-    if value is None:
-        monkeypatch.delenv("ACCESS_CONTROL_PUBLIC_BASE_URL", raising=False)
-    else:
-        monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", value)
-    reset_all_settings()
+    """Set (or unset) ``TAI_PUBLIC_BASE_URL`` for the block."""
+    set_public_base_url(monkeypatch, value)
     try:
         yield
     finally:

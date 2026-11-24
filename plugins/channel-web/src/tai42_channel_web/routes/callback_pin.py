@@ -35,7 +35,7 @@ def pin_stored_callback(callback_url: str, *, interaction_id: str, forwarded: st
     if prefix is None:
         _log_refusal(interaction_id, "public_base_unset", _host_of(callback_url), forwarded)
         raise CallbackPrefixUnsetError(
-            "INTERACTIONS_PUBLIC_BASE_URL is not set; the platform mints no callback URL to pin against"
+            "TAI_PUBLIC_BASE_URL is not set; the platform mints no callback URL to pin against"
         )
     try:
         pin_callback_url(callback_url, prefix=prefix)

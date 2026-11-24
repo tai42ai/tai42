@@ -24,6 +24,7 @@ from tai42_kit.net.media_faults import MEDIA_FETCH_AND_INGEST_FAULTS, media_faul
 from tai42_kit.settings import require_secret
 
 from tai42_channel_telegram.client import TelegramFilePermanentError, get_file
+from tai42_channel_telegram.correlation import already_seen, mark_seen
 from tai42_channel_telegram.inbound_bridge import (
     _bridge,
     _ignored,
@@ -246,21 +247,29 @@ async def _reject_media(
     """Notify the participant a media could not be bridged, preserve any caption, and ack.
 
     Routes through the shared ``notify_inbound_rejected`` chokepoint (the single participant
-    notice + operator event). When the message carried a caption, ALSO bridges a text-only turn
-    carrying it — the served media does not exist, so no ``media_id``/sha/size/filename and never
-    the raw vendor filename, only the kind and the vendor-declared mime. No caption -> notice + ack.
+    notice + operator event). The notice is guarded by its own seen marker
+    (``f"{update_id}:rejected"``), set once the chokepoint returns: a redelivery driven by a
+    transient fault in the caption's bridge never repeats the notice. The chokepoint logs a failed
+    send of the notice and does not raise, so it is not sent again; a fault the chokepoint
+    propagates (a route-resolution store fault) leaves the marker unset, so the redelivery
+    notifies. When the message carried a caption, ALSO bridges a text-only turn carrying it — the
+    served media does not exist, so no ``media_id``/sha/size/filename and never the raw vendor
+    filename, only the kind and the vendor-declared mime. No caption -> notice + ack.
     """
     our_identity = _our_identity(settings)
     if isinstance(our_identity, JSONResponse):
         return our_identity
     member = media.member
-    await tai42_app.conversations.notify_inbound_rejected(
-        channel_id="telegram",
-        recipient=str(media.chat_id),
-        sender_identity=our_identity,
-        kind=member.kind.value,
-        reason=reason,
-    )
+    notice_key = f"{update['update_id']}:rejected"
+    if not await already_seen(notice_key):
+        await tai42_app.conversations.notify_inbound_rejected(
+            channel_id="telegram",
+            recipient=str(media.chat_id),
+            sender_identity=our_identity,
+            kind=member.kind.value,
+            reason=reason,
+        )
+        await mark_seen(notice_key)
     if media.caption is not None:
         # A rejected media that was a reply to a pending ask never resolves it (the media does not
         # exist): the caption bridges as a fresh turn and the ask stays pending.

@@ -25,11 +25,14 @@ from __future__ import annotations
 import contextlib
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import empty_checkpoint
+from tai42_contract.app import tai42_app
+from tai42_skeleton.monitoring.noop import NoOpMonitoring
 
 from tai42_e2e.stack import TaiStack
 
@@ -52,7 +55,8 @@ async def _harness_store(
 
     The harness process carries the stack's retention and shared-value settings, so a thread it
     writes on the ``redis`` provider carries the same waiting TTL the SUT's writes do, and every
-    write stores its values as the SUT's do.
+    write stores its values as the SUT's do. The kit's saver reads the app's monitoring on every
+    store call, so the store is open under an app whose monitoring records nothing.
     """
     from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_saver_from_resource
     from tai42_kit.settings import reset_all_settings
@@ -65,12 +69,14 @@ async def _harness_store(
     else:
         monkeypatch.setenv("LLM_PROVIDER_CHECKPOINT_SHARED_VALUES", "true" if shared_values else "false")
     reset_all_settings()
-    resource, close = await create_checkpoint_resource(provider, conn_string)
-    try:
-        yield get_saver_from_resource(provider, resource), resource.ledger, resource
-    finally:
-        await close()
-        reset_all_settings()
+    app = SimpleNamespace(monitoring=SimpleNamespace(active=NoOpMonitoring()))
+    with tai42_app.bound(app):
+        resource, close = await create_checkpoint_resource(provider, conn_string)
+        try:
+            yield get_saver_from_resource(provider, resource), resource.ledger, resource
+        finally:
+            await close()
+            reset_all_settings()
 
 
 def _thread_config(thread_id: str) -> RunnableConfig:

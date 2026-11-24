@@ -455,10 +455,12 @@ class _FakeResourceManager:
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
-            from tai42_skeleton.template.errors import TemplateNotFoundError
+            from tai42_contract.template import TemplateNotFoundError
 
             if text.id not in _CHECK_RESOURCES:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return _CHECK_RESOURCES[text.id]
         assert text.content is not None
         return text.content

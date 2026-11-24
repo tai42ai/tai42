@@ -46,7 +46,11 @@ from tai42_kit.llm.middleware.system_purge import SystemPurgeMiddleware
 from tai42_kit.llm.models import cache_mark_key, requires_leading_user_turn
 from tai42_kit.utils.data.string_util import text_to_md5
 
-from tai42_agents._internal.recovery import _invalid_tool_call_answers, _tool_error_middleware
+from tai42_agents._internal.recovery import (
+    _invalid_tool_call_answers,
+    _tool_error_middleware,
+    _without_unanswerable_calls,
+)
 
 
 def _merged_selected_tools(left: list[str], right: list[str]) -> list[str]:
@@ -264,10 +268,13 @@ class RetrievalToolsGraph:
                 rolled = roll_cache_marks(messages, self._cache_mark_key)
                 messages = rolled if rolled is not None else messages
             response = await llm_with_tools.ainvoke(messages)
-            # Raw graph node: the shared model-turn hook never runs here, so the turn's
-            # invalid tool calls (arguments that did not parse) are answered right after it.
-            answers = _invalid_tool_call_answers(response) if isinstance(response, AIMessage) else []
-            return {"messages": [response, *answers]}
+            # Raw graph node: the shared model-turn middleware never runs here, so the turn
+            # drops its unanswerable invalid tool calls (arguments that did not parse) and
+            # its other invalid calls are answered right after it.
+            if not isinstance(response, AIMessage):
+                return {"messages": [response]}
+            turn = _without_unanswerable_calls(response)
+            return {"messages": [turn, *_invalid_tool_call_answers(turn)]}
 
         self._agent_node = RunnableCallable(func=None, afunc=node)
         return self._agent_node

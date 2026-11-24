@@ -16,7 +16,7 @@ from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.manifest import ApiToolsConfig
 from tai42_contract.states import StateAttach, StateBinding
 from tai42_contract.states.errors import StateNotFoundError, StatesError, StatesNotConfiguredError
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.policy import policy_is_empty
@@ -35,7 +35,6 @@ from tai42_skeleton.operations import (
 from tai42_skeleton.operations import _authority as authority
 from tai42_skeleton.operations import hooks as hooks_ops
 from tai42_skeleton.operations.projection import project_operations
-from tai42_skeleton.template import TemplateNotFoundError
 
 
 @pytest.fixture(autouse=True)
@@ -508,7 +507,9 @@ class _FakeResourceManager:
     async def render_templated_text(self, text, locale=None) -> str:
         if text.id is not None:
             if text.id not in self._templates:
-                raise TemplateNotFoundError(f"no such template: {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return self._templates[text.id]
         return text.content
 

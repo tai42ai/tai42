@@ -32,7 +32,7 @@ shorter heartbeat TTL than the serve worker.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -48,7 +48,7 @@ from tai42_e2e.manifests import build_recycle_stack
 from tai42_e2e.readiness import expected_fleet_present
 from tai42_e2e.stack import TaiStack
 from tai42_e2e.topology import StackConfig
-from tai42_e2e.variants import bus_key_root
+from tai42_e2e.variants import BusWorker, bus_key_root
 from tai42_e2e.waiting import WaitTimeoutError, wait_absent_async
 
 _KEY = "TAI_LOG_LEVEL"
@@ -191,9 +191,14 @@ def _recycle_stack_storing(stored: dict[str, str]) -> Callable[..., StackConfig]
     return build
 
 
+def _census_lives(census: Sequence[BusWorker]) -> dict[str, tuple[str, int]]:
+    """The lives of the census rows ``census``, ``{name: (kind, generation)}``."""
+    return {worker.name: (worker.kind, worker.generation) for worker in census}
+
+
 def _lives(stack: TaiStack) -> dict[str, tuple[str, int]]:
     """The live census ``{name: (kind, generation)}``."""
-    return {worker.name: (worker.kind, worker.generation) for worker in stack.census()}
+    return _census_lives(stack.census())
 
 
 # Reload outcomes of a fleet still settling: a life that ended mid-op (``departed``) or a row
@@ -224,16 +229,22 @@ def _awaiting_respawn(report: dict[str, Any]) -> dict[str, list[str]] | None:
 
 
 async def _wait_no_worker_awaits_a_respawn(stack: TaiStack) -> None:
-    """Hold until the whole expected fleet is ready and a fleet reload names no worker awaiting a respawn.
+    """Hold until the whole expected fleet is ready and a fleet reload over it names no worker awaiting a respawn.
 
     A worker being respawned has no census row and is no reload target, so the fleet counts
-    only once every expected process is present.
+    only once every expected process is present. A worker that leaves between the census read
+    and the reload's publish is no target either and is absent from the report, so the fleet
+    counts only when the census read after the reload is the full expected fleet on the same
+    lives as the one before it and the report names every one of them.
     """
     last: list[dict[str, Any]] = []
 
+    def full_and_ready(census: Sequence[BusWorker]) -> bool:
+        return expected_fleet_present(stack, census) and all(worker.state == "ready" for worker in census)
+
     async def converged() -> bool:
-        census = stack.census()
-        if not expected_fleet_present(stack, census) or any(worker.state != "ready" for worker in census):
+        before = stack.census()
+        if not full_and_ready(before):
             return False
         try:
             report = await _fleet_reload(stack)
@@ -243,7 +254,15 @@ async def _wait_no_worker_awaits_a_respawn(stack: TaiStack) -> None:
             return False
         last[:] = [report]
         awaiting = _awaiting_respawn(report)
-        return awaiting is not None and all(keys == [] for keys in awaiting.values())
+        after = stack.census()
+        lives = _census_lives(after)
+        return (
+            awaiting is not None
+            and full_and_ready(after)
+            and lives == _census_lives(before)
+            and awaiting.keys() == lives.keys()
+            and all(keys == [] for keys in awaiting.values())
+        )
 
     try:
         await wait_for_async(converged, deadline=240.0, interval=2.0, message="a worker still awaits a respawn")

@@ -318,6 +318,31 @@ async def test_a_blank_thread_reply_to_a_pending_ask_gets_one_unreadable_notice_
     assert _DEDUPE_KEY in fake_redis.store
 
 
+async def test_a_message_shared_with_no_comment_gets_the_unsupported_type_notice(fake_redis, stub_conversations):
+    # A message shared into the channel with no comment carries a blank text and the shared
+    # message as an attachment: the door cannot bridge attachments, so the participant reads the
+    # unsupported-content notice, never the unreadable one.
+    event = {
+        "type": "message",
+        "channel": TEST_DEFAULT_RECIPIENT,
+        "user": "U012345",
+        "ts": "1712345679.000300",
+        "text": "",
+        "attachments": [
+            {"is_share": True, "is_msg_unfurl": True, "text": "the shared message", "author_id": "U0OTHER"}
+        ],
+    }
+
+    response = await slack_inbound(_signed(_event_body(event=event)))
+
+    assert body_json(response) == {"status": "ignored"}
+    assert stub_conversations.accept_calls == []
+    (rejected,) = stub_conversations.rejected_calls
+    assert rejected.recipient == TEST_DEFAULT_RECIPIENT
+    assert rejected.kind == "attachments"
+    assert rejected.reason is InboundRejectionReason.UNSUPPORTED_TYPE
+
+
 @pytest.mark.parametrize("channel", [None, "", 7])
 async def test_a_message_with_no_channel_is_logged_and_acked(channel, fake_redis, stub_conversations, caplog):
     event = _reply_event(channel=channel)

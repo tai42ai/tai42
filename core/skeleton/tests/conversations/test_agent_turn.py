@@ -326,10 +326,10 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
     resolves the per-locale template variant off that same locale — the run selects no
     language. Without a variant (and no default) the render refuses loudly."""
     from tai42_contract.storage import ObjectStat, Storage
+    from tai42_contract.template import TemplateNotFoundError
 
     from tai42_skeleton.storage import StorageRegistry
     from tai42_skeleton.template import ResourceManager
-    from tai42_skeleton.template.errors import TemplateLocaleNotFoundError
 
     channel = FakeChannel()
     _wire(monkeypatch, FakeManager(_tool_channel_route()), channel)
@@ -398,7 +398,7 @@ async def test_channel_locale_composes_through_the_turn_into_a_rendered_variant(
     manager = ResourceManager(registry.provider, on_evicted=lambda _eviction: None, held_by=app_held_by)
 
     assert await manager.render_by_id("welcome", locale=cast(str, seen["ambient_locale"])) == "shalom"
-    with pytest.raises(TemplateLocaleNotFoundError):
+    with pytest.raises(TemplateNotFoundError):
         await manager.render_by_id("missing", locale=cast(str, seen["ambient_locale"]))
 
 

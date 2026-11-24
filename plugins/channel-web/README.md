@@ -449,7 +449,7 @@ unknown token.
   `answer.rejected` / `answer.rejected_final` sentence as `{reason}`). Before
   the forward, the record's stored callback URL is pinned against the platform's
   callback prefix (`tai42_app.interactions.callback_url_prefix()`); a record outside
-  it, or a deployment with no `INTERACTIONS_PUBLIC_BASE_URL`, is refused — an `ERROR`
+  it, or a deployment with no `TAI_PUBLIC_BASE_URL`, is refused — an `ERROR`
   log names the interaction, reason and host (never the URL), the claimed record is
   not restored, nothing is sent, and the door answers `500`. The session's link
   params ride the answer and an over-bound set is refused `422` before the claim.

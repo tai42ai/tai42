@@ -35,6 +35,8 @@ from tai42_skeleton.interactions import InteractionStore, ask
 from tai42_skeleton.interactions import helper as helper_module
 from tai42_skeleton.interactions.settings import InteractionsSettings
 
+from .._helpers import set_public_base_url
+
 _PUBLIC_BASE = "https://host.example"
 
 
@@ -112,12 +114,11 @@ def wired(monkeypatch, fake_client_ctx):
     """Bind the app + a capturing channel over a shared correlation store, and wire the
     helper's settings/redis and the ladder's forward/accept/hooks/public-base seams."""
     app._channel_registry.reset()
-    settings = InteractionsSettings(public_base_url=_PUBLIC_BASE)
+    # The helper mints and the ladder pins the callback host from the SAME public base.
+    set_public_base_url(monkeypatch, _PUBLIC_BASE)
+    settings = InteractionsSettings()
     monkeypatch.setattr(helper_module, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(helper_module, "interactions_settings", lambda: settings)
-    # The ladder pins the callback host to the SAME public base the helper minted from.
-    ladder_settings = InteractionsSettings(public_base_url=_PUBLIC_BASE)
-    monkeypatch.setattr(inbound_module, "interactions_settings", lambda: ladder_settings)
 
     corr_store = FakeCorrelationStore()
     channel = CapturingChannel(corr_store)

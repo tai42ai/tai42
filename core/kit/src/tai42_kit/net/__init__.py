@@ -23,7 +23,6 @@ from tai42_kit.net.url_guard import (
     UrlGuardSettings,
     enforce_size,
     guard_enabled,
-    is_loopback_host,
     resolve_and_validate,
     url_guard_settings,
 )
@@ -70,7 +69,6 @@ __all__ = [
     "fetch_url",
     "guard_enabled",
     "guarded_request",
-    "is_loopback_host",
     "media_url_host",
     "open_media_stream",
     "resolve_and_validate",

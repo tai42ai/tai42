@@ -3,7 +3,7 @@
 One RFC 9728 metadata document per MCP endpoint, read by an MCP client before it signs in:
 the endpoint's public URL (``resource``), the authorization servers it accepts tokens from,
 and how a token is presented. Served only while the door is on (an active identity provider
-declares an authorization server and ``ACCESS_CONTROL_PUBLIC_BASE_URL`` is set) and only for
+declares an authorization server and ``TAI_PUBLIC_BASE_URL`` is set) and only for
 the path of an MCP endpoint itself; every other request is a 404. The answer is the same for
 every well-formed sub-MCP slug, registered or not, so the document reveals no slug.
 

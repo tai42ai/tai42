@@ -6,9 +6,10 @@ Doors:
   ``list_interactions`` operation): the initial-load surface a client reads before
   applying the live stream. Audience-filtered before paging so the totals are honest.
 * ``GET /api/interactions/stream`` — the authenticated TAIL-ONLY SSE feed: a live
-  tail of add/answered/removed events from the cursor captured at connect. It
-  carries no historical backlog and no end-of-backlog marker (the paged list door
-  is the initial-load surface).
+  tail of add/answered/removed events from the cursor captured at connect, or after
+  the client's ``Last-Event-ID`` (400 when it is malformed, 410 when it is no longer
+  in the retained stream). It carries no historical backlog and no end-of-backlog
+  marker (the paged list door is the initial-load surface).
 * ``GET /api/interactions/media/{media_id}`` — the UNAUTHENTICATED served-media
   door: the media id is the capability secret (a vendor fetches the url from its
   own servers, a browser ``<img>`` from the inbox origin). Serves the stored bytes

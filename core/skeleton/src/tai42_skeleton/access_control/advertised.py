@@ -1,7 +1,7 @@
 """What the MCP door advertises: the authorization servers MCP clients sign in at, and the door's public URLs.
 
 The door is on only when BOTH hold: an active identity provider declares an authorization
-server (``IdentityProvider.authorization_servers``) and ``ACCESS_CONTROL_PUBLIC_BASE_URL``
+server (``IdentityProvider.authorization_servers``) and ``TAI_PUBLIC_BASE_URL``
 is set. :func:`advertised_authorization_servers` is the one definition of that switch: the
 metadata documents, the 401 pointer and the request resource all ask it. The two URL
 builders are the only places a public URL of the door is composed; nothing reads a
@@ -16,9 +16,11 @@ from urllib.parse import urlsplit
 
 from tai42_contract.access_control.identity import IdentityProvider
 from tai42_contract.app import tai42_app
+from tai42_contract.urls import is_loopback_host
 
-from tai42_skeleton.access_control.settings import access_control_settings, is_loopback_host
+from tai42_skeleton.access_control.settings import access_control_settings
 from tai42_skeleton.app.reload_gate import reload_gate
+from tai42_skeleton.settings.public_base_url import PUBLIC_BASE_URL_SETTING, public_base_url_settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +31,14 @@ PROTECTED_RESOURCE_METADATA_PREFIX = "/.well-known/oauth-protected-resource"
 def advertised_authorization_servers() -> tuple[str, ...]:
     """The authorization servers this deployment advertises to MCP clients, in order, without duplicates.
 
-    Empty when access control is off or ``public_base_url`` is unset; otherwise the
+    Empty when access control is off or ``TAI_PUBLIC_BASE_URL`` is unset; otherwise the
     declarations of the active identity providers, read the way the token verifier reads
     them. A provider missing while a reload swaps the providers contributes nothing (the
     request beneath is answered with the retriable reload envelope); one missing outside a
     reload is a fault and raises.
     """
     settings = access_control_settings()
-    if not settings.enable or settings.public_base_url is None:
+    if not settings.enable or public_base_url_settings().base_url is None:
         return ()
     servers: dict[str, None] = {}
     for name in settings.resolved_auth_providers():
@@ -60,9 +62,9 @@ def mcp_metadata_url(endpoint_path: str) -> str:
 
 
 def _public_base_url() -> str:
-    base = access_control_settings().public_base_url
+    base = public_base_url_settings().base_url
     if base is None:
-        raise RuntimeError("ACCESS_CONTROL_PUBLIC_BASE_URL is unset; the MCP door advertises no URL")
+        raise RuntimeError(f"{PUBLIC_BASE_URL_SETTING} is unset; the MCP door advertises no URL")
     return base
 
 
@@ -73,7 +75,7 @@ def validate_declared_authorization_servers(providers: Iterable[tuple[str, Ident
     an absolute ``https`` URL (``http`` only on a loopback host) with no query, fragment or
     userinfo, else ``RuntimeError`` naming the provider and the value — a bad declaration
     fails the build, it is never dropped. A provider that declares a server while
-    ``ACCESS_CONTROL_PUBLIC_BASE_URL`` is unset logs one WARNING per build.
+    ``TAI_PUBLIC_BASE_URL`` is unset logs one WARNING per build.
     """
     declaring: list[str] = []
     for name, provider in providers:
@@ -87,11 +89,12 @@ def validate_declared_authorization_servers(providers: Iterable[tuple[str, Ident
                 )
         if servers:
             declaring.append(name)
-    if declaring and access_control_settings().public_base_url is None:
+    if declaring and public_base_url_settings().base_url is None:
         logger.warning(
             "identity provider(s) %s declare an authorization server; MCP client sign-in is not advertised "
-            "until ACCESS_CONTROL_PUBLIC_BASE_URL is set",
+            "until %s is set",
             ", ".join(repr(name) for name in declaring),
+            PUBLIC_BASE_URL_SETTING,
         )
 
 

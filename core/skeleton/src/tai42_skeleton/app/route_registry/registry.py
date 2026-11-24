@@ -144,6 +144,7 @@ class RouteRegistry:
         if declared is None:
             reload_gated = False
             holds_writer_exit = False
+            answers_leaving = False
             reads_body = False
             error_statuses: tuple[int, ...] = ()
             success_status = 200
@@ -156,10 +157,9 @@ class RouteRegistry:
             holds_writer_exit = declared.holds_writer_exit
             reads_body = declared.reads_body
             # A route holding the writer's exit answers the leaving ``503`` on a worker that decided
-            # to leave: the declaration owns that status, as ``authed`` owns the ``401``.
-            error_statuses = (
-                tuple(sorted({*declared.error_statuses, 503})) if holds_writer_exit else declared.error_statuses
-            )
+            # to leave, as does a route that declares it relays that refusal.
+            answers_leaving = holds_writer_exit or declared.answers_leaving
+            error_statuses = declared.error_statuses
             success_status = declared.success_status
             additional_success_statuses = declared.additional_success_statuses
             max_body_bytes = declared.max_body_bytes
@@ -180,6 +180,7 @@ class RouteRegistry:
             query_model=query_model,
             reload_gated=reload_gated,
             holds_writer_exit=holds_writer_exit,
+            answers_leaving=answers_leaving,
             reads_body=reads_body,
             error_statuses=error_statuses,
             success_status=success_status,
@@ -253,6 +254,7 @@ class RouteRegistry:
             response_model=None,
             reload_gated=False,
             holds_writer_exit=False,
+            answers_leaving=False,
             reads_body=False,
             error_statuses=(),
             success_status=200,

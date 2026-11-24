@@ -1,7 +1,8 @@
 """The refusal of an MCP selection change that would stop picking a tool something still uses.
 
 Every manifest write passes :class:`~tai42_skeleton.config.service.ConfigService`, which runs
-:func:`refuse_held_unpicks` on the stored document and the one it would persist. The check
+:func:`refuse_held_unpicks` on the stored document and the one it would persist; this module is
+that pipeline's check. The check
 decides from the stored manifest, the stored presets and the listing this worker bound the
 server from, not from the bound set, which holds only the selected tools.
 """
@@ -16,7 +17,7 @@ from tai42_contract.tools import ReferenceHolder
 from tai42_skeleton.app import instance
 from tai42_skeleton.manifest import selection_admits
 from tai42_skeleton.operations.holders import holders_refusal, rename_holders_by_tool
-from tai42_skeleton.operations.manifest.listing_failure import listing_failure
+from tai42_skeleton.operations.listing_failure import listing_failure
 from tai42_skeleton.operations.reference_graph import StoredPresets
 from tai42_skeleton.tools import holder_kinds
 from tai42_skeleton.tools.naming import normalized_name

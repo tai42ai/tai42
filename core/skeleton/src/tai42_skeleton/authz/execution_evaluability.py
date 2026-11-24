@@ -8,13 +8,12 @@ the authoritative assertion still runs at the fire, on the text rendered then.
 
 from __future__ import annotations
 
-from jinja2 import TemplateError
 from tai42_contract.access_control.models import AccessPolicy
+from tai42_contract.template import TemplateRenderError
 
 from tai42_skeleton.access_control.policy import render_condition
 from tai42_skeleton.access_control.standing import Standing
 from tai42_skeleton.authz.token_free import TokenFreeConditionError, assert_token_free_evaluable
-from tai42_skeleton.template import TemplateNotFoundError
 
 
 class ExecutionConditionError(TokenFreeConditionError):
@@ -48,7 +47,7 @@ async def _assert_condition_evaluable(policy: AccessPolicy, *, principal: str) -
         return
     try:
         condition = (await render_condition(policy.condition)).text
-    except (ValueError, TemplateError, TemplateNotFoundError) as exc:
+    except TemplateRenderError as exc:
         raise ExecutionConditionError(
             f"the policy condition of {principal!r} does not render ({exc}), so it cannot be shown evaluable "
             "for a background execution; repair the condition before binding this execution key",

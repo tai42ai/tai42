@@ -79,6 +79,9 @@ class RouteMetadata:
     # worker that decided to leave (``WorkerLeavingError``, 503).
     holds_writer_exit: bool
     reads_body: bool
+    # Whether the route answers the leaving ``503`` (``WorkerLeavingError``'s own body): every route
+    # that holds the writer's exit, and one that relays the refusal of a change it runs.
+    answers_leaving: bool
     error_statuses: tuple[int, ...]
     success_status: int
     additional_success_statuses: tuple[int, ...]

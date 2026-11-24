@@ -93,11 +93,6 @@ async def test_dispatch_names_dead_worker(fresh_stack: Callable[..., TaiStack], 
         },
     )
 
-    # Drain worker A's boot-time self-resync gate first, so the dispatch below is not
-    # itself rejected as reloading while the corpse's presence-TTL counts down.
-    async with stack.mcp(port=stack.port_a) as mcp:
-        await mcp.call_tool("e2e_worker_info")
-
     # The backend worker's bus slot name, matched by kind + pid off the presence census.
     dead_pid = stack.process("backend").pid
     dead_name = next(w.name for w in stack.census() if w.kind == "backend" and w.pid == dead_pid)

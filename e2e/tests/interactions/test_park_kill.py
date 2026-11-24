@@ -297,7 +297,7 @@ async def _assert_no_door_notice(web: WebChatClient) -> None:
     "kind:channels:web",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
 )
 async def test_thread_delete_tears_down_a_route_parked_caller_ask(
@@ -324,7 +324,7 @@ async def test_thread_delete_tears_down_a_route_parked_caller_ask(
     "kind:channels:web",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
 )
 async def test_route_delete_tears_down_a_route_parked_caller_ask(
@@ -349,7 +349,7 @@ async def test_route_delete_tears_down_a_route_parked_caller_ask(
     "mutable",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
 )
 async def test_person_erase_tears_down_a_route_parked_caller_ask(
@@ -449,7 +449,7 @@ async def _await_route_thread(api: ApiClient, route_name: str, *, deadline: floa
     "helper:llm",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:TAI_AGENTS_REDIS_URL",
     "setting:agent:tools_agent",
@@ -505,7 +505,7 @@ async def test_thread_delete_leaves_no_agents_driver_state(
     "helper:llm",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:TAI_AGENTS_REDIS_URL",
     "setting:agent:tools_agent",
@@ -563,7 +563,7 @@ async def test_a_kill_at_a_nested_caller_ask_delivers_no_notice_and_clears_the_p
     "kind:channels:web",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1",
 )
@@ -619,7 +619,7 @@ async def test_a_route_started_user_ask_killed_by_expiry_delivers_one_door_faile
     "kind:channels:web",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:INTERACTIONS_EXPIRY_REAPER_INTERVAL_SECONDS=1",
 )
@@ -705,7 +705,7 @@ async def test_a_route_started_user_ask_lapsed_past_its_horizon_is_surfaced_once
     "helper:llm",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:TAI_AGENTS_REDIS_URL",
     "setting:agent:tools_agent",
@@ -762,7 +762,7 @@ async def test_an_agent_route_started_user_ask_killed_by_expiry_delivers_one_doo
     "helper:llm",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:TAI_AGENTS_REDIS_URL",
     "setting:agent:tools_agent",
@@ -831,7 +831,7 @@ async def test_a_cancel_of_one_park_takes_the_runs_other_park_down_and_says_noth
     "helper:llm",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:TAI_AGENTS_REDIS_URL",
     "setting:agent:tools_agent",
@@ -900,7 +900,7 @@ async def test_a_cancel_of_a_parents_ask_takes_the_nested_runs_park_down_and_say
     "helper:llm",
     "store:redis",
     "setting:seeded-access-control",
-    "setting:INTERACTIONS_PUBLIC_BASE_URL",
+    "setting:TAI_PUBLIC_BASE_URL",
     "setting:CHANNEL_WEB_SESSION_COOKIE_SECURE=false",
     "setting:TAI_AGENTS_REDIS_URL",
     "setting:agent:tools_agent",

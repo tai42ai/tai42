@@ -10,7 +10,6 @@ import {
   formReactionsOf,
   formUpdateOf,
   headerOf,
-  isRecord,
   isTimestamp,
   locationOf,
   mediaOf,
@@ -21,15 +20,6 @@ import {
 
 const MEDIA_REF = `/api/interactions/media/${'M'.repeat(43)}`;
 const NO_IMAGE_SLOTS: ReadonlySet<string> = new Set();
-
-describe('isRecord', () => {
-  it('accepts a plain object and rejects arrays, null, and primitives', () => {
-    expect(isRecord({ a: 1 })).toBe(true);
-    expect(isRecord([1, 2])).toBe(false);
-    expect(isRecord(null)).toBe(false);
-    expect(isRecord('x')).toBe(false);
-  });
-});
 
 describe('parseJson', () => {
   it('returns null for empty input, invalid JSON, and non-object JSON', () => {

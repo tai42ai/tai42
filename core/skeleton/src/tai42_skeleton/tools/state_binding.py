@@ -42,12 +42,11 @@ from tai42_contract.states.errors import (
     TemplateValidationError,
     ValueValidationError,
 )
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateRenderError
 from tai42_kit.utils.data import run_jq_first
 from tai42_kit.utils.data.jq_util import compile_check
 
 from tai42_skeleton.states.service.unit import current_state_unit
-from tai42_skeleton.template.errors import TEMPLATE_RENDER_ERRORS, template_render_refusal
 from tai42_skeleton.template.references import assert_templates_stored
 
 if TYPE_CHECKING:
@@ -125,8 +124,8 @@ async def _render_slot(app: TaiMCP, slot: str, text: TemplatedText) -> str:
     """
     try:
         return await app.storage.resource_manager.render_templated_text(text)
-    except TEMPLATE_RENDER_ERRORS as exc:
-        raise ValueValidationError(f"state binding {slot} {template_render_refusal(text, exc)}") from exc
+    except TemplateRenderError as exc:
+        raise ValueValidationError(f"state binding {slot} {exc}") from exc
 
 
 def merge_bindings(door: StateBinding | None, preset: StateBinding | None) -> StateBinding | None:

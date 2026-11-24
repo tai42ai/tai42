@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,20 @@ _pkg = sys.modules["tai42_skeleton.routers.interactions"]
 # every connect.
 _CONNECT_FRAME = ": connected\n\n"
 
+RESUME_EXPIRED_CODE = "interactions-resume-expired"
+RESUME_MALFORMED_CODE = "interactions-resume-malformed"
+
+
+class ResumeRefusedError(Exception):
+    """A ``Last-Event-ID`` the stream cannot resume from, carrying the refusal's status and code."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        """Hold the HTTP ``status``, the error ``code`` and the ``message`` the refusal answers with."""
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
 
 def _now() -> float:
     """The monotonic loop clock the keepalive deadline reads.
@@ -74,41 +89,55 @@ def _frame(event: str, data: dict, event_id: str) -> str:
     return f"id: {event_id}\nevent: {event}\ndata: {json.dumps(data)}\n\n"
 
 
+_STREAM_ID = re.compile(r"([0-9]+)(?:-([0-9]+))?")
+_STREAM_ID_PART_MAX = 2**64 - 1
+
+
 def _parse_stream_id(value: str) -> tuple[int, int]:
-    # A Redis stream id is ``<ms>-<seq>``; a bare ``<ms>`` implies seq 0. A value
-    # that does not parse (a Last-Event-ID the client never got from us) raises,
-    # which the caller turns into the logged tail fallback rather than a crash.
-    ms, _, seq = value.partition("-")
-    return (int(ms), int(seq) if seq else 0)
+    # A Redis stream id is ``<ms>-<seq>``; a bare ``<ms>`` implies seq 0. Each part is
+    # ASCII digits within an unsigned 64-bit integer, the range Redis accepts; any other
+    # value (a Last-Event-ID the client never got from us) raises ValueError.
+    match = _STREAM_ID.fullmatch(value)
+    if match is None:
+        raise ValueError(f"not a stream id: {value!r}")
+    ms, seq = int(match[1]), int(match[2] or 0)
+    if ms > _STREAM_ID_PART_MAX or seq > _STREAM_ID_PART_MAX:
+        raise ValueError(f"stream id part out of range: {value!r}")
+    return (ms, seq)
 
 
 async def _resume_cursor(r: Redis, store: InteractionStore, last_event_id: str | None) -> str:
     """Resolve the events-stream cursor for a (re)connect.
 
-    With a ``Last-Event-ID`` that is still inside the retained stream window, resume
-    the tail AFTER it so every event during the disconnect gap (the ``answered``
-    frame included) is replayed. When the id is absent, malformed, or already trimmed
-    off the head, fall back to the tail END — the connect-time behavior the client's
-    pending-base reseed backs up — and LOG the fallback so a lost-resume is never
-    silent. Trimming only ever removes the OLDEST ids, so an id at or after the
-    smallest retained id has every later event still present and is safe to resume.
+    Without a ``Last-Event-ID`` (absent or empty) the stream opens at the tail end. With
+    one still inside the retained stream window the tail resumes AFTER it, so every event
+    of the disconnect gap is replayed. Trimming only ever removes the OLDEST ids, so an id
+    at or after the smallest retained id has every later event still present. A malformed
+    id raises :class:`ResumeRefusedError` 400; an id older than the smallest retained one, or
+    any id against an empty stream, raises :class:`ResumeRefusedError` 410.
     """
-    if last_event_id:
-        try:
-            requested = _parse_stream_id(last_event_id)
-        except ValueError:
-            logger.warning("interactions SSE resume: malformed Last-Event-ID %r; falling back to tail", last_event_id)
-        else:
-            head = await r.xrange(store.events_key, count=1)
-            if head and requested >= _parse_stream_id(as_str(head[0][0])):
-                return last_event_id
-            logger.info(
-                "interactions SSE resume: Last-Event-ID %s trimmed from the stream; "
-                "falling back to tail + pending-base reseed",
-                last_event_id,
-            )
-    tail = await r.xrevrange(store.events_key, count=1)
-    return as_str(tail[0][0]) if tail else "0-0"
+    if not last_event_id:
+        tail = await r.xrevrange(store.events_key, count=1)
+        return as_str(tail[0][0]) if tail else "0-0"
+    try:
+        requested = _parse_stream_id(last_event_id)
+    except ValueError as exc:
+        raise ResumeRefusedError(
+            400,
+            RESUME_MALFORMED_CODE,
+            f"Last-Event-ID {last_event_id!r} is not an interactions events-stream id (<ms>-<seq>); send the id "
+            "of a frame this stream delivered, or reconnect without Last-Event-ID.",
+        ) from exc
+    head = await r.xrange(store.events_key, count=1)
+    if not head or requested < _parse_stream_id(as_str(head[0][0])):
+        raise ResumeRefusedError(
+            410,
+            RESUME_EXPIRED_CODE,
+            f"Last-Event-ID {last_event_id!r} is no longer in the interactions events stream: the events after it "
+            "cannot be replayed. Reconnect without Last-Event-ID and re-read GET /api/interactions for the "
+            "pending base.",
+        )
+    return last_event_id
 
 
 async def _frame_for_event(
@@ -261,7 +290,7 @@ async def _stream_events(request: Request, store: InteractionStore, cursor: str)
     declared=DeclaredRouteMetadata(
         reload_gated=False,
         reads_body=False,
-        error_statuses=(401, 501),
+        error_statuses=(400, 401, 410, 501),
         success_status=200,
     ),
     action="read",
@@ -269,8 +298,10 @@ async def _stream_events(request: Request, store: InteractionStore, cursor: str)
 async def stream(request: Request) -> Response:
     """Serve the interactions inbox live tail as an SSE ``StreamingResponse``.
 
-    Refuses with a plain 501 when the store is unconfigured; otherwise resumes from the
-    caller's ``Last-Event-ID`` (or the current tail end) and streams the live tail.
+    Refuses with a plain 501 when the store is unconfigured, with 400 for a malformed
+    ``Last-Event-ID`` and with 410 for one no longer in the retained stream; otherwise
+    resumes after the caller's ``Last-Event-ID`` (or opens at the current tail end) and
+    streams the live tail.
     """
     # OFF gate — BEFORE the StreamingResponse is constructed: an unconfigured store
     # answers a plain 501+code up front rather than sending 200 + SSE headers and
@@ -284,15 +315,19 @@ async def stream(request: Request) -> Response:
     # SSE resume: a reconnecting client echoes the last-delivered stream id back as the
     # ``Last-Event-ID`` header (a ``?last_event_id=`` query param is the fallback for
     # transports that cannot set the header). With it the cursor resumes AFTER the gap;
-    # without it (or when it has been trimmed) the tail END is captured instead.
+    # without it the tail END is captured instead; one the stream cannot resume from is
+    # refused before any body.
     last_event_id = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
     # Resolve the cursor on the pooled connection BEFORE the response is returned, so a
     # client that has received the response headers is guaranteed every later add: any
     # event published after this read has an id past the cursor. The connection is
     # released here — the never-completing tail below runs on its own dedicated
     # connection and must never pin the shared pool.
-    async with _pkg.client_ctx(RedisClient, _pkg.interactions_settings().redis) as r:
-        cursor = await _resume_cursor(r, store, last_event_id)
+    try:
+        async with _pkg.client_ctx(RedisClient, _pkg.interactions_settings().redis) as r:
+            cursor = await _resume_cursor(r, store, last_event_id)
+    except ResumeRefusedError as exc:
+        return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
     return StreamingResponse(
         _stream_events(request, store, cursor),
         media_type="text/event-stream",

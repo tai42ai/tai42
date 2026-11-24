@@ -231,17 +231,17 @@ def _channel_env(res: StackResources, variants: Variants) -> dict[str, str]:
 
 def _channel_public_keys(switch: HarnessSettings) -> list[str]:
     """The public-base-URL env keys the channel stack routes to ``E2E_PUBLIC_BASE_URL``
-    when a channel is real inbound: telegram's setWebhook origin
-    (``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``) when telegram is real, and the ask
-    callback origin (``INTERACTIONS_PUBLIC_BASE_URL``) minted into a real medium's
-    outbound whenever any channel is real. Empty on the all-mock default, so the
-    loopback replica-B fill is unchanged."""
-    keys: list[str] = []
-    if switch.is_real("telegram"):
-        keys.append("CHANNEL_TELEGRAM_PUBLIC_BASE_URL")
+    when a channel is real inbound: the deployment's one public address
+    (``TAI_PUBLIC_BASE_URL``), which carries telegram's setWebhook origin and the
+    ask callback origin minted into a real medium's outbound. Empty on the all-mock
+    default, so the loopback replica-B fill is unchanged.
+
+    In a mixed run (one channel real, another mock) the one key carries the public
+    origin for the whole stack, so the callback URL minted for a mock medium is
+    public too; the mock door's signed origin is independent of the routed key."""
     if any(switch.is_real(seam) for seam in _CHANNEL_SEAMS):
-        keys.append("INTERACTIONS_PUBLIC_BASE_URL")
-    return keys
+        return ["TAI_PUBLIC_BASE_URL"]
+    return []
 
 
 def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -297,7 +297,7 @@ def build_channel_stack(res: StackResources, variants: Variants) -> StackConfig:
         # URL that resolves on B, and telegram's setWebhook URL points at B. Known only
         # once ports bind. A real inbound channel overrides its key to the public origin
         # (see ``public_base_url_env_keys``), so the vendor reaches it.
-        replica_b_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL", "CHANNEL_TELEGRAM_PUBLIC_BASE_URL"],
+        replica_b_origin_env_keys=["TAI_PUBLIC_BASE_URL"],
         public_base_url_env_keys=_channel_public_keys(switch),
         public_base_url=switch.public_base_url,
     )

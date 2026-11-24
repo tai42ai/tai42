@@ -88,9 +88,15 @@ class _StubHttp:
         # The resolved absolute mount base register captures at import; a test
         # overrides it to prove setWebhook follows a remapped route base.
         self.mount_base_value = "/api/channels/telegram"
+        # The deployment's public address the platform hands out, normalised (no
+        # trailing slash); a test sets it to ``None`` for a deployment that declares none.
+        self.public_base_url_value: str | None = "https://example.test"
 
     def mount_base(self) -> str:
         return self.mount_base_value
+
+    def public_base_url(self) -> str | None:
+        return self.public_base_url_value
 
     def custom_route(
         self,
@@ -272,6 +278,9 @@ class FakeRedis:
     async def get(self, key: str) -> str | None:
         return self.data.get(key)
 
+    async def exists(self, key: str) -> int:
+        return int(key in self.data)
+
     async def delete(self, key: str) -> None:
         self.data.pop(key, None)
         self.ttls.pop(key, None)
@@ -387,7 +396,6 @@ def channel_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("CHANNEL_TELEGRAM_DEFAULT_RECIPIENT", "777")
     monkeypatch.setenv("CHANNEL_TELEGRAM_ALLOWED_RECIPIENTS", "888,999")
     monkeypatch.setenv("CHANNEL_TELEGRAM_WEBHOOK_SECRET", "s3cret_token")
-    monkeypatch.setenv("CHANNEL_TELEGRAM_PUBLIC_BASE_URL", "https://example.test")
     monkeypatch.setenv("CHANNEL_TELEGRAM_REDIS_URL", "redis://localhost:6379/0")
     reset_all_settings()
     yield

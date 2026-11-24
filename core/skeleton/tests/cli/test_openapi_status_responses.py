@@ -1,4 +1,4 @@
-"""OpenAPI emission — status responses: the coverage gate, the two 503 sources and
+"""OpenAPI emission — status responses: the coverage gate, the three 503 sources and
 their shapes, and per-door documented status sets."""
 
 from __future__ import annotations
@@ -8,9 +8,6 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
 from tai42_skeleton.app.route_registry import RouteMetadata
-from tai42_skeleton.cli.openapi import (
-    _STATUS_DESCRIPTIONS,
-)
 
 from .conftest import _operation
 
@@ -55,19 +52,25 @@ def test_gated_routes_declare_the_retriable_503(spec: dict, api_routes: list[Rou
             assert response["headers"]["Retry-After"]["schema"]["type"] == "integer"
 
 
-# -- The two sources of a 503, and the SHAPE each publishes -------------------
+# -- The three sources of a 503, and the SHAPE each publishes -----------------
 #
-# A 503 reaches a route from two independent sources that answer DIFFERENT bodies, so
+# A 503 reaches a route from three independent sources that answer DIFFERENT bodies, so
 # the published shape has to follow the source rather than the status:
 #
+# * a declared ``503`` (an operation's ``UnavailableError``, or a native handler that
+#   declares one) answers the plain ``{"error": <message>}`` envelope — ``Error``;
 # * the reload gate (``reload_gated``) answers the constant-message ``ReloadingError``
 #   body plus a ``Retry-After`` header;
-# * a declared ``503`` (an operation's ``UnavailableError``, or a native handler that
-#   declares one) answers the plain ``{"error": <message>}`` envelope with no
-#   ``reloading`` field and no header.
+# * the leaving refusal (``answers_leaving``: every route holding the writer's exit, and run-tool,
+#   which relays a projected change's refusal) answers ``{"error": …, "leaving": <reason>}`` —
+#   ``LeavingError``: a worker that decided to leave refuses the change before it begins.
 #
 # Every route publishing a 503 is pinned into its class below, so a route changing
 # source — or a new one arriving — trips here and its shape is re-confirmed.
+_ERROR = "Error"
+_RELOADING = "ReloadingError"
+_LEAVING = "LeavingError"
+
 _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
     ("DELETE", "/api/presets/{name}"),
     ("DELETE", "/api/sub-mcp/{slug}"),
@@ -96,14 +99,6 @@ _EXPECTED_503_GATE_ONLY: set[tuple[str, str]] = {
 # the version-tags PUT (neither reload-gated) declare NO 503 at all and are absent
 # from this set.
 _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
-    # The fleet soft restart and the connector doors that write the managed manifest entries declare
-    # ``holds_writer_exit``, which publishes the leaving 503 (a worker that decided to leave refuses
-    # the change before it begins); none is reload-gated, so each carries that 503 alone.
-    ("POST", "/api/fleet/reload-config"),
-    ("POST", "/api/connectors/connections/start"),
-    ("DELETE", "/api/connectors/connections/{connection_id}"),
-    ("PATCH", "/api/connectors/connections/{connection_id}/sub-services"),
-    ("POST", "/api/connectors/oauth/complete"),
     # The operator thread/person doors — the forget-thread DELETE, the erase-person DELETE and
     # the operator-send POST — declare the per-thread FIFO's full-queue UnavailableError
     # (retriable), and none is reload-gated, so each carries that 503 alone.
@@ -149,12 +144,31 @@ _EXPECTED_503_DECLARED_ONLY: set[tuple[str, str]] = {
     ("GET", "/api/states/{name}/subjects"),
 }
 
-_EXPECTED_503_BOTH: set[tuple[str, str]] = {
-    # Every door that writes through the config service's write exclusion, or soft-restarts the
-    # fleet, declares ``holds_writer_exit``, which publishes the leaving 503: a worker that decided to
-    # leave refuses the change before it begins, with the plain envelope carrying ``leaving``. On
-    # these reload-gated doors that 503 sits beside the gate's own. The backup import is refused whole
-    # the same way.
+# The fleet soft restart and the connector doors that write the managed manifest entries hold the
+# writer's exit and are neither reload-gated nor declare an ``UnavailableError``, so the leaving
+# refusal is their only 503.
+_EXPECTED_503_LEAVING_ONLY: set[tuple[str, str]] = {
+    ("POST", "/api/fleet/reload-config"),
+    ("POST", "/api/connectors/connections/start"),
+    ("DELETE", "/api/connectors/connections/{connection_id}"),
+    ("PATCH", "/api/connectors/connections/{connection_id}/sub-services"),
+    ("POST", "/api/connectors/oauth/complete"),
+}
+
+_EXPECTED_503_DECLARED_AND_GATE: set[tuple[str, str]] = {
+    ("DELETE", "/api/schedules/{schedule_name}"),
+    ("POST", "/api/conversations/{route_name}/events"),
+    ("POST", "/api/conversations/{route_name}/messages"),
+    ("POST", "/api/schedules"),
+    # tool-runs keeps its declared 503: it is the per-worker CAPACITY UnavailableError
+    # (retry later), independent of the store gate, which is a 501.
+    ("POST", "/api/tool-runs"),
+}
+
+# Every reload-gated door that writes through the config service's write exclusion, or
+# soft-restarts the fleet, holds the writer's exit: its leaving refusal sits beside the gate's own.
+# The backup import is refused whole the same way.
+_EXPECTED_503_GATE_AND_LEAVING: set[tuple[str, str]] = {
     ("POST", "/api/backup/import"),
     ("DELETE", "/api/agents-config/entries/{title}"),
     ("DELETE", "/api/connectors/providers/{provider_id}"),
@@ -167,28 +181,25 @@ _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     ("POST", "/api/tools-config/entries"),
     ("POST", "/api/tools/{name}/extensions"),
     ("POST", "/api/tools/{name}/extensions/combos"),
-    ("DELETE", "/api/schedules/{schedule_name}"),
-    ("POST", "/api/conversations/{route_name}/events"),
-    ("POST", "/api/conversations/{route_name}/messages"),
-    # The marketplace mutations keep a declared 503 beside the reload gate: it is the
-    # transient fleet-advisory-lock UnavailableError (retriable), NOT the store gate,
-    # which refuses with a 501. Both sources coexist here alongside that 501. An update whose new
-    # version changes an MCP tool selection also refuses the listing 503s named below.
+}
+
+_EXPECTED_503_ALL_THREE: set[tuple[str, str]] = {
+    # The marketplace mutations keep a declared 503 beside the reload gate and the leaving
+    # refusal: it is the transient fleet-advisory-lock UnavailableError (retriable), NOT the store
+    # gate, which refuses with a 501. An update whose new version changes an MCP tool selection
+    # also refuses the listing 503s named below.
     ("POST", "/api/marketplace/install"),
     ("POST", "/api/marketplace/uninstall"),
     ("POST", "/api/marketplace/update"),
     ("POST", "/api/marketplace/upgrade-all"),
-    ("POST", "/api/schedules"),
-    # tool-runs keeps its declared 503: it is the per-worker CAPACITY UnavailableError
-    # (retry later), independent of the store gate, which is a 501.
-    ("POST", "/api/tool-runs"),
-    # The synchronous run-tool door declares the pending-save UnavailableError: a subject of the
-    # run still has a pending state save after the drain timeout (retry later).
+    # The synchronous run-tool door declares the pending-save UnavailableError (a subject of the
+    # run still has a pending state save after the drain timeout) and relays the leaving refusal
+    # of a projected change it runs.
     ("POST", "/api/run-tool"),
     # The writes that can change an MCP tool selection check the tools still used against the
     # listing this worker bound the server from; with no listing held they refuse a 503 while the
     # server's start is in progress (``mcp-server-starting``) or while this worker has not loaded
-    # it (``mcp-server-not-loaded``), beside the reload gate's own.
+    # it (``mcp-server-not-loaded``), beside the reload gate's and the leaving refusal's own.
     ("POST", "/api/config/env"),
     ("POST", "/api/config/profiles/{name}/apply"),
     ("POST", "/api/manifest/replace"),
@@ -198,85 +209,96 @@ _EXPECTED_503_BOTH: set[tuple[str, str]] = {
     ("PUT", "/api/mcp-config/entries/{title}/tool-filter"),
 }
 
+# The shapes each class publishes, in the order the 503 slot lists them.
+_EXPECTED_503_CLASSES: dict[tuple[str, ...], set[tuple[str, str]]] = {
+    (_RELOADING,): _EXPECTED_503_GATE_ONLY,
+    (_ERROR,): _EXPECTED_503_DECLARED_ONLY,
+    (_LEAVING,): _EXPECTED_503_LEAVING_ONLY,
+    (_ERROR, _RELOADING): _EXPECTED_503_DECLARED_AND_GATE,
+    (_RELOADING, _LEAVING): _EXPECTED_503_GATE_AND_LEAVING,
+    (_ERROR, _RELOADING, _LEAVING): _EXPECTED_503_ALL_THREE,
+}
 
-def _503_source_classes(api_routes: list[RouteMetadata]) -> dict[str, set[tuple[str, str]]]:
-    classes: dict[str, set[tuple[str, str]]] = {"gate": set(), "declared": set(), "both": set()}
+_EXPECTED_503_SHAPES: list[tuple[str, str, tuple[str, ...]]] = sorted(
+    (method, path, shapes) for shapes, routes in _EXPECTED_503_CLASSES.items() for method, path in routes
+)
+
+
+def _503_source_classes(api_routes: list[RouteMetadata]) -> dict[tuple[str, ...], set[tuple[str, str]]]:
+    classes: dict[tuple[str, ...], set[tuple[str, str]]] = {}
     for meta in api_routes:
-        declared = 503 in meta.error_statuses
-        if meta.reload_gated and declared:
-            key = "both"
-        elif meta.reload_gated:
-            key = "gate"
-        elif declared:
-            key = "declared"
-        else:
-            continue
-        classes[key].update((method, meta.path) for method in meta.methods)
+        shapes = tuple(
+            shape
+            for shape, present in (
+                (_ERROR, 503 in meta.error_statuses),
+                (_RELOADING, meta.reload_gated),
+                (_LEAVING, meta.answers_leaving),
+            )
+            if present
+        )
+        if shapes:
+            classes.setdefault(shapes, set()).update((method, meta.path) for method in meta.methods)
     return classes
 
 
 def test_503_source_classes_match_ground_truth(api_routes: list[RouteMetadata]) -> None:
-    classes = _503_source_classes(api_routes)
-    assert classes["gate"] == _EXPECTED_503_GATE_ONLY
-    assert classes["declared"] == _EXPECTED_503_DECLARED_ONLY
-    assert classes["both"] == _EXPECTED_503_BOTH
+    assert _503_source_classes(api_routes) == _EXPECTED_503_CLASSES
 
 
-@pytest.mark.parametrize(("method", "path"), sorted(_EXPECTED_503_GATE_ONLY))
-def test_gate_only_503_publishes_the_reloading_shape(spec: dict, method: str, path: str) -> None:
-    # Reload gate alone: the constant-message reloading body, and the Retry-After header
-    # the gate always stamps.
+@pytest.mark.parametrize(("method", "path", "shapes"), _EXPECTED_503_SHAPES)
+def test_each_503_publishes_the_shape_of_each_of_its_sources(
+    spec: dict, method: str, path: str, shapes: tuple[str, ...]
+) -> None:
+    # One source publishes its body's ``$ref``; several publish one slot admitting each body. The
+    # ``Retry-After`` header rides exactly the slots the reload gate is a source of.
     response = spec["paths"][path][method.lower()]["responses"]["503"]
-    assert response["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/ReloadingError"}
-    assert response["headers"]["Retry-After"]["schema"] == {"type": "integer"}
+    refs = [{"$ref": f"#/components/schemas/{shape}"} for shape in shapes]
+    expected_schema = refs[0] if len(refs) == 1 else {"anyOf": refs}
+    assert response["content"]["application/json"]["schema"] == expected_schema
+    if _RELOADING in shapes:
+        assert response["headers"]["Retry-After"]["schema"] == {"type": "integer"}
+    else:
+        assert "headers" not in response
 
 
-@pytest.mark.parametrize(("method", "path"), sorted(_EXPECTED_503_DECLARED_ONLY))
-def test_declared_only_503_publishes_the_plain_error_shape(spec: dict, method: str, path: str) -> None:
-    # No reload gate on these doors: the adapter renders ``{"error": <message>}`` with no
-    # ``reloading`` field and no ``Retry-After``, so neither may be published.
-    response = spec["paths"][path][method.lower()]["responses"]["503"]
-    assert response["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Error"}
-    assert "headers" not in response
-    assert response["description"] == _STATUS_DESCRIPTIONS[503]
+def test_a_declared_only_503_names_the_unavailable_reason(spec: dict) -> None:
+    response = spec["paths"]["/api/notifications"]["post"]["responses"]["503"]
+    assert response["description"] == "The server cannot serve this request right now; retry shortly."
 
 
-@pytest.mark.parametrize(("method", "path"), sorted(_EXPECTED_503_BOTH))
-def test_both_sources_503_publishes_a_schema_admitting_either_body(spec: dict, method: str, path: str) -> None:
-    # One 503 slot, two possible bodies: the schema must admit both, and the header is
-    # published because the reloading half carries it.
-    response = spec["paths"][path][method.lower()]["responses"]["503"]
-    schema = response["content"]["application/json"]["schema"]
-    assert schema == {
-        "anyOf": [
-            {"$ref": "#/components/schemas/ReloadingError"},
-            {"$ref": "#/components/schemas/Error"},
-        ]
-    }
-    assert response["headers"]["Retry-After"]["schema"] == {"type": "integer"}
+def test_the_leaving_shape_requires_the_message_and_the_reason(spec: dict) -> None:
+    components = {"components": spec["components"]}
+    leaving = Draft202012Validator({"$ref": "#/components/schemas/LeavingError", **components})
+    leaving.validate({"error": "leaving — this worker is leaving (a restart) and begins no change", "leaving": "a"})
+    with pytest.raises(ValidationError):
+        leaving.validate({"error": "leaving — this worker is leaving (a restart) and begins no change"})
+    with pytest.raises(ValidationError):
+        leaving.validate({"leaving": "a restart"})
 
 
-def test_the_combined_503_schema_admits_both_bodies_and_oneof_would_not(spec: dict) -> None:
+def test_the_combined_503_schema_admits_every_body_and_oneof_would_not(spec: dict) -> None:
     """The combined shape is ``anyOf`` for a reason, pinned by validating real bodies.
 
-    ``Error`` constrains only ``error``, so a reloading body satisfies BOTH branches.
-    Under ``anyOf`` each of the two real bodies validates; under ``oneOf`` — exactly one
-    branch — the gate's own response would fail the spec it is published under.
+    ``Error`` constrains only ``error``, so a reloading or a leaving body satisfies two
+    branches. Under ``anyOf`` each real body validates; under ``oneOf`` — exactly one
+    branch — the route's own answer would fail the spec it is published under.
     """
-    combined = spec["paths"]["/api/schedules"]["post"]["responses"]["503"]["content"]["application/json"]["schema"]
+    combined = spec["paths"]["/api/run-tool"]["post"]["responses"]["503"]["content"]["application/json"]["schema"]
     # The published component schemas ride along so the document-relative ``$ref``s in the
     # combined schema resolve exactly as they do in the spec.
     components = {"components": spec["components"]}
     reloading_body = {"error": REJECT_MESSAGE, "reloading": True}
-    unavailable_body = {"error": "no installed backend exposes scheduling tools"}
+    leaving_body = {"error": "leaving — this worker is leaving (a restart) and begins no change", "leaving": "a"}
+    unavailable_body = {"error": "a subject of the run has a pending save"}
 
     any_of = Draft202012Validator({**combined, **components})
-    any_of.validate(reloading_body)
-    any_of.validate(unavailable_body)
+    for body in (reloading_body, leaving_body, unavailable_body):
+        any_of.validate(body)
 
     one_of = Draft202012Validator({"oneOf": combined["anyOf"], **components})
-    with pytest.raises(ValidationError):
-        one_of.validate(reloading_body)
+    for body in (reloading_body, leaving_body):
+        with pytest.raises(ValidationError):
+            one_of.validate(body)
 
 
 # The reload-gated routes, hand-maintained as ground truth. ``reload_gated`` is
@@ -537,6 +559,14 @@ def test_off_gate_doors_document_the_501(spec: dict, api_routes: list[RouteMetad
     assert "501" in spec["paths"][path][method.lower()]["responses"], f"{method} {path} 501 missing from the spec"
 
 
+def test_the_interactions_stream_documents_its_resume_refusals(spec: dict, api_routes: list[RouteMetadata]) -> None:
+    # A malformed Last-Event-ID answers 400 and one no longer in the retained stream 410,
+    # both before the SSE body; the route declares them and the spec publishes them.
+    (meta,) = [m for m in api_routes if m.path == "/api/interactions/stream" and "GET" in m.methods]
+    assert set(meta.error_statuses) == {400, 401, 410, 501}
+    assert {"400", "410"} <= set(_operation(spec, meta, "GET")["responses"])
+
+
 _STORED_OBJECT_DELETE_DOORS: dict[tuple[str, str], set[int]] = {
     ("POST", "/api/delete-template"): {400, 401, 409, 500},
     ("POST", "/api/delete-template-dir"): {400, 401, 404, 409, 500},
@@ -592,9 +622,10 @@ def test_scope_url_delete_doors_document_the_400(
 # ``PermissionDeniedError`` from under the dispatch passes through (403 on every one) and any
 # other raise is enveloped as an ``OperationFailedError`` (500 on every one). The sets are the
 # statuses each door answers with the plain ``{"error": ...}`` envelope — its ``errors=``
-# list plus the 401 the authed flag adds. The reload gate's 503 is NOT one of them (it
-# answers a different body); the gated doors among these carry it via ``reload_gated``,
-# and the test adds it to the expected SPEC responses from that flag.
+# list plus the 401 the authed flag adds. The reload gate's 503 and the leaving refusal's are NOT
+# among them (each answers a body of its own); the doors among these that answer one carry it via
+# ``reload_gated`` or ``answers_leaving``, and the test adds the 503 to the expected SPEC responses
+# from those flags.
 #
 # Declared is not the same as reachable, and nothing here says a door cannot answer a
 # status it leaves undeclared. ``PermissionDeniedError`` is only the sharpest case of the
@@ -608,7 +639,7 @@ _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES: dict[tuple[str, str], set[int]] = {
     # result no JSON encoder can render is a bad-tool-output fault), UnavailableError (503 — a
     # subject's pending state save did not finish in time), NotSupportedError (501 — a tool that
     # needs an optional extra the deployment lacks), OperationFailedError — and the reload gate's
-    # own 503 beside it.
+    # and the relayed leaving refusal's own 503 beside it.
     ("POST", "/api/run-tool"): {400, 401, 403, 404, 409, 500, 501, 502, 503},
     # 401 authed, PermissionDeniedError, OperationFailedError, NotSupportedError, UnavailableError
     # (503 — this door is not reload-gated, so the dispatch seam is its only source).
@@ -631,12 +662,13 @@ def test_tool_dispatch_doors_declare_their_exact_status_sets(
     # operation's response codes. Beyond the declared set an emitted operation carries its
     # ``200`` success (none of the five declares a second success code —
     # ``test_declared_additional_success_set_matches_ground_truth`` pins that) and, for a
-    # gated door, the reload gate's 503; so an extra or a missing code in the spec fails here.
+    # door answering the reload gate's or the leaving refusal's 503, that 503; so an extra or a
+    # missing code in the spec fails here.
     expected = _EXPECTED_TOOL_DISPATCH_DOOR_STATUSES[(method, path)]
     (meta,) = [m for m in api_routes if m.path == path and method in m.methods]
     assert set(meta.error_statuses) == expected
     published = {str(status) for status in expected} | {"200"}
-    if meta.reload_gated:
+    if meta.reload_gated or meta.answers_leaving:
         published.add("503")
     responses = spec["paths"][path][method.lower()]["responses"]
     assert set(responses) == published, (

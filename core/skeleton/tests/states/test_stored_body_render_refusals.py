@@ -1,7 +1,7 @@
 """A state template program body the template engine cannot render is a loud 422 refusal.
 
 A real :class:`ResourceManager` over an in-memory store renders each body. A stored body (by
-``id``) or an inline body with broken Jinja fails its render with a ``jinja2.TemplateError``; the
+``id``) or an inline body that does not parse or render fails with a ``TemplateRenderError``; the
 save door and the run-time render each refuse it as a ``TemplateValidationError`` naming the
 program and the id (or the inline body), never an unmapped error.
 """
@@ -29,12 +29,14 @@ from .fake_service_store import _STATE, FakeStatesStore, _subject
 
 _ORIGIN = WriteOrigin(consumer="c")
 _BROKEN = "{{ oops"
+_DIVIDES_BY_ZERO = "{{ 1 / 0 }}"
 _SCHEMA = {"type": "object", "properties": {"ledger": {"type": "array", "items": {"type": "object"}}}}
 
 # The stored objects the in-memory store serves; reset per test.
 _STORED_BASE = {
     "stored-any-due.jq": "(.ledger // []) | length > 0",
     "stored-broken.jq": _BROKEN,
+    "stored-divides-by-zero.jq": _DIVIDES_BY_ZERO,
     "stored-orphans.jq": "[]",
 }
 _STORED: dict[str, str] = {}
@@ -84,6 +86,27 @@ async def test_a_stored_program_body_with_broken_jinja_is_refused_at_save(svc: S
         "template 't' template_jq 'any_due' references stored id 'stored-broken.jq', which could not be rendered"
         in str(excinfo.value)
     )
+
+
+async def test_a_stored_program_body_that_fails_while_rendering_is_refused_at_save(svc: StatesService) -> None:
+    with pytest.raises(ValidationRejectedError) as excinfo:
+        await _put("t", {"template_jq": {"any_due": {"purpose": "input", "jq": {"id": "stored-divides-by-zero.jq"}}}})
+    assert excinfo.value.status == 422
+    assert (
+        "template 't' template_jq 'any_due' references stored id 'stored-divides-by-zero.jq', "
+        "which could not be rendered: division by zero"
+    ) in str(excinfo.value)
+
+
+async def test_a_store_outage_while_rendering_a_stored_program_propagates_at_save(
+    svc: StatesService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _down(self: _Store, path: str) -> str:
+        raise ConnectionError("store down")
+
+    monkeypatch.setattr(_Store, "load", _down)
+    with pytest.raises(ConnectionError, match="store down"):
+        await _put("t", {"template_jq": {"any_due": {"purpose": "input", "jq": {"id": "stored-any-due.jq"}}}})
 
 
 async def test_a_stored_declarations_check_with_broken_jinja_is_refused_at_save(svc: StatesService) -> None:
@@ -140,6 +163,18 @@ async def test_an_inline_program_body_with_broken_jinja_is_refused_at_run_time(s
     await svc.replace(_STATE.name, _subject(), {"ledger": []}, origin=_ORIGIN)
     with pytest.raises(
         TemplateValidationError, match=r"template 't' template_jq 'any_due' is not a renderable template"
+    ):
+        await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
+
+
+async def test_an_inline_program_body_that_fails_while_rendering_is_refused_at_run_time(svc: StatesService) -> None:
+    await svc.put_declaration(_STATE)
+    await _put("t", {"template_jq": {"any_due": {"purpose": "input", "jq": {"content": '"{{ 1 / 0 }}"'}}}})
+    await svc.attach(_STATE.name, "t", AttachBody(path=[]))
+    await svc.replace(_STATE.name, _subject(), {"ledger": []}, origin=_ORIGIN)
+    with pytest.raises(
+        TemplateValidationError,
+        match=r"template 't' template_jq 'any_due' is not a renderable template: division by zero",
     ):
         await svc.eval_template_jq(_STATE.name, _subject(), "any_due", {})
 

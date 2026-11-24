@@ -27,11 +27,13 @@ route outside the ``/api/*`` spec surface, e.g. ``/health`` or ``/ready``)
 records trivial defaults, since its behavioral metadata is never emitted.
 
 ``error_statuses`` are the statuses a route answers with the plain
-``{"error": ...}`` envelope. The reload gate's ``503`` is not one of them — it
-answers the constant-message reloading envelope with a ``Retry-After`` header — so
-it is declared by ``reload_gated`` alone and the emitter owns its response. A route
-declaring ``503`` therefore says it answers a PLAIN ``503`` too, and one declaring
-both publishes a ``503`` admitting either body.
+``{"error": ...}`` envelope. Two other ``503`` bodies are not among them, each
+declared by a flag and its response owned by the emitter: the reload gate's
+constant-message reloading envelope with a ``Retry-After`` header (``reload_gated``)
+and a leaving worker's refusal carrying its ``leaving`` reason (``answers_leaving``,
+which a route holding the writer's exit answers too). A route declaring ``503``
+therefore says it answers a PLAIN ``503`` too, and a route with several sources
+publishes a ``503`` admitting each of their bodies.
 
 The per-method success CONTENT TYPE is the route's own ``success_media_types``
 declaration: the default JSON surface answers the ``{"data": ...}`` envelope, while

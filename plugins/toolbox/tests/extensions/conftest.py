@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.extensions import ExtensionKind
+from tai42_contract.template import TemplateNotFoundError
 
 
 class _NullTools:
@@ -128,7 +129,7 @@ class _FakeResourceManager:
     async def render_templated_text(self, text: Any, locale: str | None = None) -> str:
         if text.id is not None:
             if text.id not in self._by_id:
-                raise KeyError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
             return self._by_id[text.id]
         assert text.content is not None
         return text.content

@@ -177,7 +177,7 @@ class ChannelCase:
 
         The public origin is bound ONLY when THIS case's OWN medium runs real —
         ``is_real(self.name)``. The stack-wide routing (``public_base_url_env_keys``
-        carries ``INTERACTIONS_PUBLIC_BASE_URL`` whenever ANY channel seam is real)
+        carries ``TAI_PUBLIC_BASE_URL`` whenever ANY channel seam is real)
         must NOT decide this: in a mixed session (e.g. real telegram alongside a
         mock twilio parametrization) the key is routed for the stack, yet the mock
         twilio door still reaches over loopback — gating on the routed key would make

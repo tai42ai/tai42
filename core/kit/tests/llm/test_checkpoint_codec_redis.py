@@ -32,7 +32,7 @@ from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_
 
 from ._real_redis import real_redis_url
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("noop_monitoring")]
 
 
 class Shade(enum.Enum):
@@ -105,6 +105,11 @@ async def redis_saver() -> AsyncIterator[Any]:
         yield get_saver_from_resource("redis", resource)
     finally:
         await closer()
+
+
+def _store_saver(saver: Any) -> Any:
+    """The store's own saver under the kit's timing and shared-values layers."""
+    return saver.inner.inner
 
 
 def _config(thread_id: str) -> dict[str, Any]:
@@ -202,8 +207,8 @@ async def _stored_large_value(saver: Any) -> dict[str, Any]:
     checkpoint["channel_values"] = {"v": {"pad": _PAD}, "small": {"a": 1}}
     checkpoint["channel_versions"] = {"v": "1", "small": "1"}
     await saver.aput(_config(thread_id), checkpoint, {"source": "input", "step": 0, "parents": {}}, {})
-    key = await saver.inner._redis.get(saver.inner._make_redis_checkpoint_latest_key(thread_id, ""))
-    [stored] = await saver.inner._redis.json().get(key, "$.checkpoint.channel_values")
+    key = await _store_saver(saver)._redis.get(_store_saver(saver)._make_redis_checkpoint_latest_key(thread_id, ""))
+    [stored] = await _store_saver(saver)._redis.json().get(key, "$.checkpoint.channel_values")
     assert (await saver.aget_tuple(_config(thread_id))).checkpoint["channel_values"] == checkpoint["channel_values"]
     await saver.adelete_thread(thread_id)
     assert stored["small"] == {"a": 1}
@@ -216,7 +221,7 @@ async def test_a_large_channel_value_is_stored_once_per_thread_and_referenced(re
 
 
 async def _stored_checkpoint_key(saver: Any, thread_id: str) -> str:
-    key = await saver.inner._redis.get(saver.inner._make_redis_checkpoint_latest_key(thread_id, ""))
+    key = await _store_saver(saver)._redis.get(_store_saver(saver)._make_redis_checkpoint_latest_key(thread_id, ""))
     return key.decode() if isinstance(key, bytes) else key
 
 
@@ -231,7 +236,7 @@ async def test_an_undecodable_stored_channel_value_raises_from_every_read(redis_
     checkpoint["channel_versions"] = {"v": "1"}
     await redis_saver.aput(_config(thread_id), checkpoint, {"source": "input", "step": 0, "parents": {}}, {})
     key = await _stored_checkpoint_key(redis_saver, thread_id)
-    await redis_saver.inner._redis.json().set(key, "$.checkpoint.channel_values.v.args[1]", "not-a-number")
+    await _store_saver(redis_saver)._redis.json().set(key, "$.checkpoint.channel_values.v.args[1]", "not-a-number")
     try:
         with pytest.raises(CheckpointSerializationError, match=r"found 1 undecodable value\(s\)"):
             await redis_saver.aget_tuple(_config(thread_id))
@@ -254,7 +259,7 @@ async def test_an_undecodable_stored_write_raises(redis_saver: Any) -> None:
         _config(thread_id), empty_checkpoint(), {"source": "input", "step": 0, "parents": {}}, {}
     )
     await redis_saver.aput_writes(saved, [("v", Decimal("1"))], task_id="task-1")
-    keys = [k async for k in redis_saver.inner._redis.scan_iter(match=f"*{thread_id}*")]
+    keys = [k async for k in _store_saver(redis_saver)._redis.scan_iter(match=f"*{thread_id}*")]
     write_keys = []
     for k in keys:
         name = k.decode() if isinstance(k, bytes) else k
@@ -263,7 +268,7 @@ async def test_an_undecodable_stored_write_raises(redis_saver: Any) -> None:
     assert write_keys
     corrupt = base64.b64encode(b'{"lc":2,"type":"constructor","id":["os","getcwd"],"args":[]}').decode()
     for k in write_keys:
-        await redis_saver.inner._redis.json().set(k, "$.blob", corrupt)
+        await _store_saver(redis_saver)._redis.json().set(k, "$.blob", corrupt)
     try:
         with pytest.raises(CheckpointSerializationError, match="cannot be decoded"):
             await redis_saver.aget_tuple(_config(thread_id))
@@ -283,16 +288,16 @@ async def test_every_key_of_a_fresh_thread_carries_the_waiting_ttl_and_a_read_is
     )
     await redis_saver.aput_writes(saved, [("v", 1)], task_id="task-1")
     try:
-        keys = [k async for k in redis_saver.inner._redis.scan_iter(match=f"*{thread_id}*")]
+        keys = [k async for k in _store_saver(redis_saver)._redis.scan_iter(match=f"*{thread_id}*")]
         assert len(keys) >= 3  # checkpoint, latest pointer, write
         waiting = 10080 * 60
         for key in keys:
-            ttl = await redis_saver.inner._redis.ttl(key)
+            ttl = await _store_saver(redis_saver)._redis.ttl(key)
             assert waiting - 60 <= ttl <= waiting, key
-        before = (await redis_saver.inner._redis.info("commandstats")).get("cmdstat_expire", {}).get("calls", 0)
+        before = (await _store_saver(redis_saver)._redis.info("commandstats")).get("cmdstat_expire", {}).get("calls", 0)
         for _ in range(5):
             assert await redis_saver.aget_tuple(_config(thread_id)) is not None
-        after = (await redis_saver.inner._redis.info("commandstats")).get("cmdstat_expire", {}).get("calls", 0)
+        after = (await _store_saver(redis_saver)._redis.info("commandstats")).get("cmdstat_expire", {}).get("calls", 0)
         assert after == before
     finally:
         await redis_saver.adelete_thread(thread_id)
@@ -360,7 +365,7 @@ async def test_metadata_is_stored_exactly_as_the_library_stores_it(monkeypatch) 
     try:
         saver: Any = get_saver_from_resource("redis", resource)
         dumped: list[tuple[str, str]] = []
-        saver_cls: Any = type(saver.inner)
+        saver_cls: Any = type(_store_saver(saver))
         kit_dump = saver_cls._dump_metadata
 
         def _recording_dump(self: Any, metadata: Any) -> str:
@@ -441,7 +446,7 @@ async def test_a_value_json_cannot_hold_is_refused_by_put_and_put_writes(redis_s
 # --------------------------------------------------------------------------- #
 async def _thread_keys(saver: Any, thread_id: str) -> dict[str, int]:
     counts = {"checkpoint": 0, "checkpoint_write": 0}
-    async for key in saver.inner._redis.scan_iter(match=f"*{thread_id}*", count=5000):
+    async for key in _store_saver(saver)._redis.scan_iter(match=f"*{thread_id}*", count=5000):
         name = key.decode() if isinstance(key, bytes) else key
         prefix = name.split(":", 1)[0]
         if prefix in counts:
@@ -502,8 +507,8 @@ async def test_a_view_stamps_its_own_waiting_on_every_key_and_shares_the_store()
     try:
         default: Any = get_saver_from_resource("redis", resource)
         view: Any = await create_saver_with_waiting("redis", resource, 2)
-        assert view.inner.ttl_config["default_ttl"] == 2
-        assert view.inner._redis is resource.handle.client
+        assert _store_saver(view).ttl_config["default_ttl"] == 2
+        assert _store_saver(view)._redis is resource.handle.client
         short = f"view-{uuid.uuid4().hex}"
         long = f"default-{uuid.uuid4().hex}"
         for saver, thread_id in ((view, short), (default, long)):
@@ -539,8 +544,8 @@ async def test_the_registry_hands_a_declared_waiting_view_on_real_redis() -> Non
         view: Any = await reg.get_checkpointer("redis", url, ThreadRetention(2, 1))
         default: Any = await reg.get_checkpointer("redis", url)
         assert view is not default
-        assert view.inner.ttl_config["default_ttl"] == 2
-        assert default.inner.ttl_config["default_ttl"] == 10080
+        assert _store_saver(view).ttl_config["default_ttl"] == 2
+        assert _store_saver(default).ttl_config["default_ttl"] == 10080
         assert await reg.get_checkpointer("redis", url, ThreadRetention(2, 2)) is view
     finally:
         await reg.close_all()

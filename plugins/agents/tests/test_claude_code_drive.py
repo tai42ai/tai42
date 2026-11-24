@@ -28,7 +28,7 @@ from tai42_contract.connectors.models import ResolvedConnectionAuth
 from tai42_contract.conversations import ReplyTo, ReplyToStatus
 from tai42_contract.interactions import AskAnswer
 from tai42_contract.monitoring.models import SpanKind, TokenUsage
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 import tai42_agents.claude_code.agent as agent_module
 import tai42_agents.claude_code.live_sessions as live_sessions_module
@@ -372,7 +372,7 @@ def test_subagent_system_prompt_missing_id_raises(monkeypatch: pytest.MonkeyPatc
     use, never rendering as empty text."""
     _settings(monkeypatch)
     app = build_local_app()
-    with pytest.raises(KeyError):
+    with pytest.raises(TemplateNotFoundError, match="'absent'"):
         _run(
             app,
             user_message=TemplatedText(content="hi"),

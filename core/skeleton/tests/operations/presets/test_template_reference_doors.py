@@ -22,6 +22,7 @@ from tai42_contract.backend import CrontabCadence
 from tai42_contract.hooks import HookParams
 from tai42_contract.manifest import ExtensionElement
 from tai42_contract.presets.errors import PresetNotFoundError
+from tai42_contract.template import TemplateNotFoundError
 from tai42_contract.tools import ReferenceHolder, TemplateRef
 
 from tai42_skeleton.access_control.settings import AccessControlSettings
@@ -38,7 +39,6 @@ from tai42_skeleton.operations import presets as preset_ops
 from tai42_skeleton.operations import schedules as schedules_ops
 from tai42_skeleton.operations.reference_graph import ExtractorFaultError, kwargs_references
 from tai42_skeleton.routers.tool_runs_settings import ToolRunsSettings
-from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from ..._fakes.hook_runs import HookRunsHarness
 from ..._fakes.recording_storage import RecordingStorage
@@ -488,7 +488,7 @@ _PROMPT_SCHEMA = {
     "additionalProperties": False,
 }
 _PROMPT_MAP = "{user_message: {content: .user_message}, system_prompt: {id: .prompt}}"
-_RUN_MISS = "Template 'prompts/missing' not found."
+_RUN_MISS = "references stored id 'prompts/missing', which could not be fetched: Template 'prompts/missing' not found."
 _CRON = CrontabCadence(minute="0", hour="9")
 
 

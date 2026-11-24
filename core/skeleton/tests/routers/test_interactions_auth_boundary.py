@@ -29,6 +29,7 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.routers import interactions as router
 
 from .._fakes.interactions_redis import FakeRedis as InteractionsFake
+from .._helpers import set_public_base_url
 from ._auth_boundary import wire_store_from_route_strings
 
 
@@ -111,7 +112,8 @@ def boundary_client(monkeypatch):
     # The callback handlers must not reach real Redis — a resolve of an unknown
     # ticket returning 404 is the "handler was reached" signal.
     interactions_fake = InteractionsFake()
-    isettings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    isettings = InteractionsSettings()
 
     @asynccontextmanager
     async def interactions_ctx(client_cls, settings=None, *, fresh=False, **kwargs):

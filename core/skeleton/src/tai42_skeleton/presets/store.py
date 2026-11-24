@@ -225,7 +225,7 @@ class PresetStoreView(PresetStore):
         return await self._active_body(name)
 
     async def rollback(self, name: str, version: int) -> DocumentRecord:
-        """Restore an earlier ``version`` of preset ``name`` as a new active version."""
+        """Re-point preset ``name``'s active version to the existing ``version``; no copy is made."""
         try:
             return await self._store.rollback(_KIND, name, version)
         except DocumentVersionNotFoundError as exc:

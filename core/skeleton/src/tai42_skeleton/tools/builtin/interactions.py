@@ -199,7 +199,7 @@ async def ask(
             other than its own identity — a loud cross-identity authorization
             denial (the write-side mirror of the answer door's 403).
         RuntimeError: An ``external`` question (or one bound to a ``channel``)
-            was asked without ``INTERACTIONS_PUBLIC_BASE_URL`` configured.
+            was asked without ``TAI_PUBLIC_BASE_URL`` configured.
     """
     result = await _ask(
         question,

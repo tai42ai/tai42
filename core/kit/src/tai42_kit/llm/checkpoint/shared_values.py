@@ -25,6 +25,7 @@ from tai42_kit.llm.checkpoint.checkpoint import PreEncodedCheckpoint, PreEncoded
 from tai42_kit.llm.checkpoint.chunking import resolve_references, resolve_tuple
 from tai42_kit.llm.checkpoint.providers import CheckpointWrite
 from tai42_kit.llm.checkpoint.reads import CheckpointRead, raise_failures
+from tai42_kit.llm.checkpoint.thread_config import config_thread_id
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -39,10 +40,6 @@ if TYPE_CHECKING:
     from tai42_kit.llm.checkpoint.chunking import ValueEncoding
     from tai42_kit.llm.checkpoint.providers import ChannelStorage, CheckpointProvider
     from tai42_kit.llm.checkpoint.value_store import CheckpointValueStore, StoredBlob
-
-
-def _thread_of(config: RunnableConfig) -> Any:
-    return (config.get("configurable") or {}).get("thread_id")
 
 
 # --------------------------------------------------------------------------- #
@@ -212,13 +209,13 @@ class SharedValuesSaver(BaseCheckpointSaver):
         return fetch
 
     async def _resolve(self, tup: CheckpointTuple) -> CheckpointTuple:
-        return await resolve_tuple(tup, self.encoding, self._fetch(_thread_of(tup.config)))
+        return await resolve_tuple(tup, self.encoding, self._fetch(config_thread_id(tup.config)))
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Read a checkpoint tuple; an undecodable stored value or a missing shared value raises."""
         with CheckpointRead() as read:
             result = await self.inner.aget_tuple(config)
-        raise_failures(read.failures, _thread_of(config))
+        raise_failures(read.failures, config_thread_id(config))
         if result is None or not read.references:
             return result
         return await self._resolve(result)
@@ -248,7 +245,7 @@ class SharedValuesSaver(BaseCheckpointSaver):
                         item = await anext(inner)
                     except StopAsyncIteration:
                         return
-                raise_failures(read.failures, _thread_of(item.config))
+                raise_failures(read.failures, config_thread_id(item.config))
                 announced = announced or bool(read.references)
                 yield await self._resolve(item) if announced else item
         finally:
@@ -260,7 +257,7 @@ class SharedValuesSaver(BaseCheckpointSaver):
         """The delta channels' writes and seeds along the parent chain, their shared values resolved."""
         with CheckpointRead() as read:
             history = await self.inner.aget_delta_channel_history(config=config, channels=channels)
-        thread_id = _thread_of(config)
+        thread_id = config_thread_id(config)
         raise_failures(read.failures, thread_id)
         if not read.references:
             return history

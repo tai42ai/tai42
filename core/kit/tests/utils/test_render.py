@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from tai42_contract.app import tai42_app
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 
 from tai42_kit.utils.render import (
     SchemaBodyError,
@@ -24,15 +24,24 @@ from tai42_kit.utils.render import (
 
 
 class _FakeResourceManager:
-    """Records every text it is handed and answers a stored id from a map."""
+    """Records every text it is handed and answers a stored id from a map.
+
+    An unknown id raises the seam's ``TemplateNotFoundError``; ``fault``, when set, is raised
+    instead of any render, standing for a failure that is not the author's.
+    """
 
     def __init__(self) -> None:
         self.calls: list[tuple[TemplatedText, str | None]] = []
         self.resources: dict[str, str] = {}
+        self.fault: Exception | None = None
 
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         self.calls.append((text, locale))
+        if self.fault is not None:
+            raise self.fault
         if text.id is not None:
+            if text.id not in self.resources:
+                raise TemplateNotFoundError(f"references stored id {text.id!r}, which could not be fetched: not stored")
             return self.resources[text.id]
         return f"{text.content}|{sorted(text.kwargs.items())}"
 
@@ -63,8 +72,18 @@ async def test_locale_reaches_the_manager(manager: _FakeResourceManager) -> None
 
 
 async def test_a_manager_failure_propagates(manager: _FakeResourceManager) -> None:
+    manager.fault = KeyError("absent")
     with pytest.raises(KeyError):
         await render_templated_text(TemplatedText(id="absent"))
+
+
+@pytest.mark.parametrize("resolve", [resolve_schema_body, resolve_text_body])
+async def test_a_failure_that_is_not_the_authors_propagates_out_of_the_body_resolvers(
+    manager: _FakeResourceManager, resolve: Any
+) -> None:
+    manager.fault = ConnectionError("store down")
+    with pytest.raises(ConnectionError, match="store down"):
+        await resolve("f", TemplatedText(id="s"))
 
 
 # --------------------------------------------------------------------------- #
@@ -88,8 +107,9 @@ async def test_resolve_schema_body_by_id_renders_and_parses(manager: _FakeResour
 
 
 async def test_resolve_schema_body_by_id_unfetchable_raises(manager: _FakeResourceManager) -> None:
-    with pytest.raises(SchemaBodyError, match=r"stored id 'absent'.*could not be rendered"):
+    with pytest.raises(SchemaBodyError) as caught:
         await resolve_schema_body("myfield", TemplatedText(id="absent"))
+    assert str(caught.value) == "myfield references stored id 'absent', which could not be fetched: not stored"
 
 
 async def test_resolve_schema_body_invalid_json_raises(manager: _FakeResourceManager) -> None:
@@ -121,7 +141,9 @@ async def test_resolve_text_body_renders_inline_and_stored(manager: _FakeResourc
 async def test_resolve_text_body_unrenderable_names_the_field_and_the_id(manager: _FakeResourceManager) -> None:
     with pytest.raises(TextBodyError) as caught:
         await resolve_text_body("preset 'p' input_map", TemplatedText(id="absent"))
-    assert str(caught.value) == "preset 'p' input_map: its stored id 'absent' could not be rendered: 'absent'"
+    assert str(caught.value) == (
+        "preset 'p' input_map references stored id 'absent', which could not be fetched: not stored"
+    )
 
 
 @pytest.mark.parametrize("value", ["", "   \n", TemplatedText(id="blank")])

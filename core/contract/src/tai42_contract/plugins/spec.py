@@ -6,7 +6,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from tai42_contract._urls import check_web_url
 from tai42_contract.plugins.bindings import KIND_MANIFEST_BINDINGS, PluginItemKind
 from tai42_contract.plugins.field_validation import (
     DISPLAY_NAME_MAX_LEN,
@@ -23,6 +22,7 @@ from tai42_contract.plugins.field_validation import (
 from tai42_contract.plugins.item import PluginItem
 from tai42_contract.plugins.routes import route_shape, shapes_overlap
 from tai42_contract.plugins.versions import VERSION_RE, check_specifier_clause
+from tai42_contract.urls import check_web_url
 
 #: How a plugin is delivered: ``"package"`` installs a distribution, ``"descriptor"`` is an all-data,
 #: install-nothing listing.

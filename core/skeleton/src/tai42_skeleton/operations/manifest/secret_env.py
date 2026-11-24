@@ -15,7 +15,8 @@ from tai42_skeleton.config.boundary import EnvKeyClasses
 from tai42_skeleton.config.file_manager import ENV_KEY_RE
 from tai42_skeleton.config.service import ConfigService
 from tai42_skeleton.operations import BadRequestError, ConflictError, UpstreamError, operation
-from tai42_skeleton.operations._broadcast import apply_response, translate_orphan_env_write
+from tai42_skeleton.operations._broadcast import apply_response
+from tai42_skeleton.operations.errors import translate_orphan_env_write
 from tai42_skeleton.settings.env_secret_marks import SECRET_MARKS_ENV_VAR, merge_secret_marks
 from tai42_skeleton.settings.owned_settings import register_owned_settings_groups
 

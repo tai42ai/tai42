@@ -81,7 +81,7 @@ async def test_ask_blocked_on_a_answered_via_b(replicas_stack: TaiStack, uniq: C
     assert "yes-from-b" in json.dumps(view["result"])
 
 
-@pytest.mark.needs("store:redis", "setting:INTERACTIONS_PUBLIC_BASE_URL")
+@pytest.mark.needs("store:redis", "setting:TAI_PUBLIC_BASE_URL")
 async def test_external_callback_answer_is_single_use(replicas_stack: TaiStack, uniq: Callable[[str], str]) -> None:
     question = uniq("question")
 

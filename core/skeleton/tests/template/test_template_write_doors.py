@@ -23,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 from tai42_contract.app import tai42_app
 from tai42_contract.storage import ObjectStat, Storage
+from tai42_contract.template import TemplateNotFoundError
 
 import tai42_skeleton.operations.storage as storage_ops
 import tai42_skeleton.operations.templates as templates_ops
@@ -32,7 +33,6 @@ from tai42_skeleton.backup.registry import BackupRegistry
 from tai42_skeleton.backup.sections import register_core_sections
 from tai42_skeleton.operations.backup import import_backup
 from tai42_skeleton.template import ResourceManager
-from tai42_skeleton.template.errors import TemplateNotFoundError
 
 from .._fakes.bus import FakeBus
 from .._fakes.listing import keys_under

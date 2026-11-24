@@ -817,7 +817,7 @@ jobs:
       - name: Bring up RabbitMQ (celery leg only)
         if: env.TAI_E2E_TARGET == '' && matrix.backend == 'celery'
         working-directory: e2e
-        run: docker compose --profile celery up -d rabbitmq --wait
+        run: scripts/compose-up.sh celery rabbitmq
       - name: Opt into the pinned celery limitation (scheduled celery leg)
         # tests/scheduling/test_schedule_reload_limitation.py is skipped unless
         # TAI_E2E_PIN_LIMITATIONS is set (a timing-dependent celery-prefork wedge that
@@ -840,12 +840,12 @@ jobs:
         # + postgres, which the `services:` block already binds on 6379/5432 —
         # colliding with "port is already allocated". Same pattern as the celery
         # step naming `rabbitmq`. The compose langfuse-web healthcheck makes
-        # `--wait` block until Langfuse actually serves; the OpenTelemetry collector
-        # the platform exports through starts after it, and the
+        # `--wait` block until Langfuse actually serves; the langfuse worker and the
+        # OpenTelemetry collector the platform exports through start after it, and the
         # `otel-collector-health` healthcheck makes `--wait` block until the
         # collector is ready to receive.
         run: |
-          docker compose --profile monitoring up -d --wait langfuse-web langfuse-worker otel-collector otel-collector-health
+          scripts/compose-up.sh monitoring langfuse-web langfuse-worker otel-collector otel-collector-health
           echo "TAI_E2E_MONITORING=1" >> "$GITHUB_ENV"
       - name: Run the suite
         working-directory: e2e
@@ -870,7 +870,7 @@ jobs:
           tests/redis_semantics tests/storage tests/harness
       - name: Run the s3 storage axis (default leg)
         # Third storage-axis value: the s3 provider against a MinIO object store. A
-        # `services:` block can't set MinIO's `server /data` command, so bring the
+        # `services:` block can't set MinIO's `server` command, so bring the
         # compose `storage` profile up here; the variant defaults (endpoint :9002,
         # user minio / secret miniosecret) match the compose service, so no coordinate
         # env is needed. Only the storage suite touches this axis.
@@ -880,7 +880,7 @@ jobs:
         env:
           TAI_E2E_STORAGE: s3
         run: |
-          docker compose --profile storage up -d --wait storage-minio
+          scripts/compose-up.sh storage storage-minio
           uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp --junitxml=junit-s3-storage.xml tests/storage
       - name: Run the github storage axis (default leg)
         # Fourth storage-axis value: the github provider against the in-process fake
@@ -923,10 +923,7 @@ jobs:
           # Tolerant of kernels without the knob.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 2>/dev/null || true
           mkdir -p .sandbox-certs && chmod 0777 .sandbox-certs
-          # The daemon boots detached, so on a failed --wait its exit reason never
-          # reaches the run log — dump the engine's own logs before failing.
-          docker compose --profile sandbox up -d --wait sandbox-engine \
-            || { echo "::group::sandbox-engine logs"; docker compose --profile sandbox logs sandbox-engine; echo "::endgroup::"; exit 1; }
+          scripts/compose-up.sh sandbox sandbox-engine
           uv run --no-sync pytest -x -q --timeout=120 --basetemp=stacks-tmp --junitxml=junit-sandbox-docker.xml tests/sandbox_docker
           docker compose --profile sandbox down -v
       - name: Upload the JUnit report

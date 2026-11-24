@@ -206,7 +206,7 @@ def build_studio_stack(res: StackResources, variants: Variants) -> StackConfig:
         origin_allowlist_env_keys=["CONNECTORS_REDIRECT_URI_ALLOWLIST"],
         # The ask callback base the web channel's answer door forwards to must be this
         # stack's own reachable origin (single app port, known only at boot).
-        app_origin_env_keys=["INTERACTIONS_PUBLIC_BASE_URL"],
+        app_origin_env_keys=["TAI_PUBLIC_BASE_URL"],
     )
 
 

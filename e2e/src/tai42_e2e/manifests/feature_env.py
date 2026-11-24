@@ -17,6 +17,10 @@ from tai42_e2e.topology import StackResources
 if TYPE_CHECKING:
     from tai42_e2e.variants import Variants
 
+# The deployment public address a stack declares as ``TAI_PUBLIC_BASE_URL`` when it mints
+# callback URLs or advertises the MCP door; the host is never dialled.
+PUBLIC_BASE_URL = "https://e2e.local"
+
 
 def _switch() -> HarnessSettings:
     """The REAL/MOCK switch for this pytest process, read fresh from the ambient

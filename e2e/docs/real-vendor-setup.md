@@ -66,8 +66,7 @@ receive them. Every dashboard URL below is relative to a single knob:
   pull requests.
 
 Endpoint-origin settings the harness derives from `E2E_PUBLIC_BASE_URL` at wiring
-time — leave the `[AUTO-DERIVED]` entries alone: `CHANNEL_TELEGRAM_PUBLIC_BASE_URL`,
-`INTERACTIONS_PUBLIC_BASE_URL`. Every URL
+time — leave the `[AUTO-DERIVED]` entry alone: `TAI_PUBLIC_BASE_URL`. Every URL
 below is written `{E2E_PUBLIC_BASE_URL}/...`.
 
 ## Inbound-webhook vendors
@@ -212,7 +211,7 @@ push drives the registry.
 ## telegram — `TAI_E2E_REAL=telegram` — NO manual step
 
 The plugin self-registers its webhook with `setWebhook` at boot from
-`CHANNEL_TELEGRAM_PUBLIC_BASE_URL` (auto-derived). Nothing to register in any
+`TAI_PUBLIC_BASE_URL` (auto-derived). Nothing to register in any
 dashboard. Template vars: `CHANNEL_TELEGRAM_BOT_TOKEN`,
 `CHANNEL_TELEGRAM_WEBHOOK_SECRET` (AUTO), `CHANNEL_TELEGRAM_TEST_CHAT_ID`.
 

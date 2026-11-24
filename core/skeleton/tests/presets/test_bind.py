@@ -18,7 +18,7 @@ from fastmcp.tools import Tool
 from mcp.types import Icon, ToolAnnotations
 from tai42_contract.app import TaiApp, tai42_app
 from tai42_contract.secrets import SecretValue, mask_secrets
-from tai42_contract.template import TemplatedText
+from tai42_contract.template import TemplatedText, TemplateNotFoundError
 from tai42_kit.utils.render import SchemaBodyError
 
 from tai42_skeleton.presets.bind import deep_merge, preset_bind
@@ -34,10 +34,10 @@ _SCHEMA_RESOURCES = {
 class _ByIdResourceManager:
     async def render_templated_text(self, text: TemplatedText, locale: str | None = None) -> str:
         if text.id is not None:
-            from tai42_skeleton.template.errors import TemplateNotFoundError
-
             if text.id not in _SCHEMA_RESOURCES:
-                raise TemplateNotFoundError(f"no stored resource {text.id!r}")
+                raise TemplateNotFoundError(
+                    f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+                )
             return _SCHEMA_RESOURCES[text.id]
         assert text.content is not None
         return text.content
@@ -623,7 +623,7 @@ async def test_output_schema_by_id_is_rendered_parsed_and_advertised():
 
 
 async def test_output_schema_by_id_unfetchable_fails_loudly():
-    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="could not be rendered"):
+    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="which could not be fetched"):
         await preset_bind(_app(_dict_base_tool()), "report", {}, name="r", output_schema=TemplatedText(id="missing"))
 
 
@@ -646,7 +646,7 @@ async def test_input_schema_by_id_is_rendered_and_advertised():
 
 
 async def test_input_schema_by_id_unfetchable_fails_loudly():
-    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="could not be rendered"):
+    with tai42_app.bound(_ByIdApp()), pytest.raises(SchemaBodyError, match="which could not be fetched"):
         await preset_bind(
             _app(_payload_base_tool(), support=_Support("payload")),
             "runner",

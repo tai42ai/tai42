@@ -160,7 +160,14 @@ async def _process_event(payload: dict, event_id: str) -> Response:
         return JSONResponse({"status": "ignored"})
     text = event.get("text")
     if not isinstance(text, str) or not text.strip():
-        await _reject_message(channel, settings.bot_user_id, kind="text", reason=InboundRejectionReason.UNREADABLE)
+        attachments = event.get("attachments")
+        if isinstance(attachments, list) and attachments:
+            # A message shared with no comment: its attachments are content this door does not bridge.
+            await _reject_message(
+                channel, settings.bot_user_id, kind="attachments", reason=InboundRejectionReason.UNSUPPORTED_TYPE
+            )
+        else:
+            await _reject_message(channel, settings.bot_user_id, kind="text", reason=InboundRejectionReason.UNREADABLE)
         return JSONResponse({"status": "ignored"})
     thread_ts = event.get("thread_ts")
     ts = _message_ts(event, event_id)

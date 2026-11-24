@@ -16,7 +16,6 @@ import {
   formPagesOf,
   formPrefillOf,
   headerOf,
-  isRecord,
   isTimestamp,
   locationOf,
   mediaOf,
@@ -24,6 +23,7 @@ import {
   parseJson,
   sectionsOf,
 } from '@/frame-parse';
+import { isRecord } from '@/guards';
 import type { SseFrame } from '@/sse';
 import {
   ANSWER_FORMATS,

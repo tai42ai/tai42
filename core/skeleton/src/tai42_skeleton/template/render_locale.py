@@ -12,8 +12,7 @@ from babel.core import Locale, UnknownLocaleError
 from babel.lists import format_list
 from jinja2 import Template as JinjaTemplate
 from jinja2 import pass_context
-
-from tai42_skeleton.template.errors import TemplateLocaleNotFoundError, TemplateNotFoundError
+from tai42_contract.template import TemplateBodyError, TemplateNotFoundError
 
 #: The reserved render-context key the rendering layer stamps the subject's locale onto,
 #: read by :func:`list_format` — never a template author's variable (a collision raises).
@@ -66,11 +65,11 @@ async def compiled_for_locale(
 ) -> JinjaTemplate:
     """Resolve ``template_id`` to a compiled template for ``locale`` through ``compiled``.
 
-    ``compiled`` resolves one id, raising :class:`TemplateNotFoundError` when it is not stored.
-    ``None`` locale resolves the bare id unchanged (the locale-agnostic callers — hooks, authz,
-    access-control — read the bare id). A present locale walks the fallback chain and returns the
-    first stored variant; when NONE of the chain (variants AND the bare default) is stored, it
-    refuses with :class:`TemplateLocaleNotFoundError` naming the template and locale, never a
+    ``compiled`` resolves one id, raising :class:`~tai42_contract.template.TemplateNotFoundError`
+    when it is not stored. ``None`` locale resolves the bare id unchanged (the locale-agnostic
+    callers — hooks, authz, access-control — read the bare id). A present locale walks the fallback
+    chain and returns the first stored variant; when NONE of the chain (variants AND the bare
+    default) is stored, it raises ``TemplateNotFoundError`` naming the template and locale, never a
     silent wrong-language render.
     """
     if locale is None:
@@ -80,17 +79,18 @@ async def compiled_for_locale(
             return await compiled(candidate)
         except TemplateNotFoundError:
             continue
-    raise TemplateLocaleNotFoundError(
-        f"template {template_id!r} has no variant for locale {locale!r} and no default variant"
-    )
+    raise TemplateNotFoundError(f"template {template_id!r} has no variant for locale {locale!r} and no default variant")
 
 
 def with_locale(context: dict[str, Any], locale: str | None) -> dict[str, Any]:
     """The render context with the resolved ``locale`` stamped under the reserved key.
 
     The ``list_format`` filter reads it — the render carries the language, the template
-    never names one. A user variable colliding with the reserved key raises loudly.
+    never names one. A user variable colliding with the reserved key raises
+    :class:`~tai42_contract.template.TemplateBodyError`: the author's kwargs are at fault.
     """
     if LOCALE_CONTEXT_KEY in context:
-        raise ValueError(f"{LOCALE_CONTEXT_KEY!r} is a reserved render variable and cannot be a template variable")
+        raise TemplateBodyError(
+            f"{LOCALE_CONTEXT_KEY!r} is a reserved render variable and cannot be a template variable"
+        )
     return {**context, LOCALE_CONTEXT_KEY: locale}

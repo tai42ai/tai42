@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import ipaddress
 import json
 import re
 import time
@@ -36,6 +35,7 @@ import httpx
 from joserfc import jwt as _jwt
 from joserfc.errors import JoseError
 from joserfc.jwk import Key, KeySet, KeySetSerialization
+from tai42_contract.urls import is_loopback_host
 
 
 class JwtError(Exception):
@@ -88,23 +88,12 @@ class OidcDiscovery:
     end_session_endpoint: str | None
 
 
-def _is_loopback_host(host: str | None) -> bool:
-    if host is None:
-        return False
-    if host == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
-
-
 def _require_fetchable_scheme(url: str) -> None:
     """Reject a URL that is not ``https`` (loopback ``http`` excepted)."""
     parts = urlsplit(url)
     if parts.scheme == "https":
         return
-    if parts.scheme == "http" and _is_loopback_host(parts.hostname):
+    if parts.scheme == "http" and is_loopback_host(parts.hostname or ""):
         return
     raise JwksFetchError(f"Refusing to fetch {url!r}: https is required except for loopback hosts.")
 

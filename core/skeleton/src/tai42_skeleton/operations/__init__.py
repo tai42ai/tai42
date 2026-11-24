@@ -44,6 +44,7 @@ _INFRA_MODULES = frozenset(
         "decorator",
         "definition_door",
         "errors",
+        "listing_failure",
         "projection",
         "registry",
         "_authority",

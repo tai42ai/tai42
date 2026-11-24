@@ -15,6 +15,7 @@ from tai42_kit.clients.impl.redis import RedisClient
 from tai42_skeleton.interactions.media import substitute_media
 from tai42_skeleton.interactions.origin import get_interaction_origin
 from tai42_skeleton.interactions.store import InteractionStore
+from tai42_skeleton.settings.public_base_url import public_base_url_settings
 
 from .errors import InteractionLimitError
 from .park import AsyncParkBinding
@@ -154,7 +155,7 @@ async def persist_question(
         # extends them to the group horizon. https/link items pass through unchanged.
         # A channel ask must carry an ABSOLUTE served url (a relative reference is
         # unfetchable off-origin), so pass ``base_url`` when a channel is set
-        # (``public_base_url`` is already hard-required whenever a channel is set);
+        # (``TAI_PUBLIC_BASE_URL`` is already hard-required whenever a channel is set);
         # an inbox-only ask keeps the relative same-origin url.
         stored_media = (
             await substitute_media(
@@ -162,7 +163,7 @@ async def persist_question(
                 r,
                 media,
                 helper.interactions_settings().idle_ttl_seconds,
-                base_url=helper.interactions_settings().public_base_url if channel is not None else None,
+                base_url=public_base_url_settings().base_url if channel is not None else None,
             )
             if media is not None
             else None

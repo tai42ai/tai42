@@ -67,7 +67,12 @@ from tai42_kit.llm.runtime import validate_structured_output
 from tai42_kit.utils.data.json_schema_util import JsonSchemaValidationError
 
 from tai42_agents._internal.outcomes import build_reprompt_handler, drive_reprompt_counter
-from tai42_agents._internal.recovery import _UNPARSED_ARGUMENTS, _answerable_invalid_calls, _is_answerable
+from tai42_agents._internal.recovery import (
+    _UNPARSED_ARGUMENTS,
+    _answerable_invalid_calls,
+    _is_answerable,
+    _without_unanswerable_calls,
+)
 
 #: A produced value that is well-formed but does not conform to the authored schema.
 _VALIDATION_ERRORS = (JsonSchemaValidationError, pydantic.ValidationError)
@@ -213,12 +218,14 @@ def reprompt_feedback(failure_message: AIMessage | None, text: str) -> list[AnyM
     re-prompt text (a ``ToolMessage`` per call, as the default rail does). That includes
     each invalid tool call (arguments that did not parse) that has an id and a name: a
     provider sends those back as tool calls, and every tool call needs its answer. An
-    invalid call with no id or no name cannot be answered and is logged.
+    invalid call with no id or no name cannot be answered: the turn it returns drops it
+    and it is logged (:func:`_without_unanswerable_calls`).
     Otherwise (a text answer) it is a single ``HumanMessage``. A missing answer message
     degrades to the bare ``HumanMessage`` so the loop still re-prompts.
     """
     if failure_message is None:
         return [HumanMessage(content=text)]
+    failure_message = _without_unanswerable_calls(failure_message)
     answers: list[AnyMessage] = [
         ToolMessage(content=text, tool_call_id=call["id"], name=call["name"]) for call in failure_message.tool_calls
     ]

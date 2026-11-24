@@ -27,6 +27,12 @@ from typing import Annotated, Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
+from tai42_contract.template.errors import (
+    TemplateBodyError,
+    TemplateNotFoundError,
+    TemplateNotTextError,
+    TemplateRenderError,
+)
 from tai42_contract.template.eviction import TemplateEviction
 
 # The vendor-extension key a jq-typed property carries in generated JSON schemas.
@@ -196,7 +202,11 @@ __all__ = [
     "ConditionMixin",
     "ExprMixin",
     "ImageReference",
+    "TemplateBodyError",
     "TemplateEviction",
+    "TemplateNotFoundError",
+    "TemplateNotTextError",
+    "TemplateRenderError",
     "TemplatedText",
     "expression_annotation",
 ]

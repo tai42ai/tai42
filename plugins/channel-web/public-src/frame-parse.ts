@@ -4,6 +4,7 @@
  * one, or `undefined` for an off-shape one that taints the whole frame — so a
  * malformed frame is surfaced rather than rendered as a blank or unsafe entry.
  */
+import { isRecord } from '@/guards';
 import type {
   AnswerFormat,
   CardOption,
@@ -22,10 +23,6 @@ import type {
   QuestionFacet,
   ReplyOption,
 } from '@/transcript-model';
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 export function parseJson(data: string): Record<string, unknown> | null {
   if (!data) return null;

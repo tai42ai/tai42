@@ -8,7 +8,9 @@ import logging
 from datetime import UTC, datetime
 from typing import cast
 
+import pytest
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 from tai42_contract.interactions import AnswerFormat, InteractionResponse
 
 from tai42_skeleton.operations.interactions import _add_data
@@ -325,49 +327,107 @@ async def test_stream_resume_delivers_gap_answered_frame(wired):
     assert _frame_fields(answered[0]).get("id")
 
 
-async def test_stream_resume_falls_back_when_last_event_id_trimmed(wired, caplog):
-    # A Last-Event-ID that predates the retained stream window (the id was trimmed)
-    # must NOT silently resume past a gap it cannot cover: the route falls back to the
-    # tail END (the client's pending-base reseed via the paged list door heals the
-    # rest) and LOGS the fallback rather than silently skipping.
-    from starlette.responses import StreamingResponse
-
-    await _seed(wired, iid="i1", gid="g1")  # add event, well past a "0-1" id
+async def _seed_add_and_gap_answer(wired) -> None:
+    await _seed(wired, iid="i1", gid="g1")
     prior = InteractionResponse(
         interaction_id="i1", answer={}, answered_by="external-callback", answered_at=datetime.now(UTC)
     )
     await wired.store.record_answer(wired.fake, prior, "g1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
-    with caplog.at_level(logging.INFO, logger="tai42_skeleton.routers.interactions"):
+
+
+def _refusal(resp) -> tuple[int, dict]:
+    assert isinstance(resp, JSONResponse), type(resp)
+    return resp.status_code, json.loads(bytes(resp.body))
+
+
+async def test_stream_resume_refuses_a_trimmed_last_event_id_with_410(wired, caplog):
+    # A Last-Event-ID older than the smallest retained id cannot be replayed: the route
+    # refuses before any body with 410 and the expired code, and logs nothing.
+    await _seed_add_and_gap_answer(wired)
+    with caplog.at_level(logging.DEBUG, logger="tai42_skeleton.routers.interactions"):
         resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": "0-1"})))
-        assert isinstance(resp, StreamingResponse)
-        frames = [cast(str, f) async for f in resp.body_iterator]
-    # Fell back to the tail END: the gap answered frame is NOT replayed on the wire
-    # (the client reseeds the answered/pending state from the list door instead).
-    assert not [f for f in frames if _is_event(f, "interaction.answered")]
-    # Never silent: the fallback is logged.
-    assert any("trimmed" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+    status, body = _refusal(resp)
+    assert status == 410
+    assert body["code"] == "interactions-resume-expired"
+    assert "'0-1'" in body["error"]
+    assert not caplog.records, [r.getMessage() for r in caplog.records]
 
 
-async def test_stream_resume_falls_back_when_last_event_id_malformed(wired, caplog):
-    # A Last-Event-ID the client never got from us (it does not parse as a ``<ms>-<seq>``
-    # stream id) is not a resume we can honour: the route falls back to the tail END (the
-    # paged pending-base reseed heals the rest) and LOGS the malformed id rather than
-    # silently skipping — the never-silent guarantee's ValueError branch.
+async def test_stream_resume_refuses_a_malformed_last_event_id_with_400(wired, caplog):
+    await _seed_add_and_gap_answer(wired)
+    with caplog.at_level(logging.DEBUG, logger="tai42_skeleton.routers.interactions"):
+        resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": "not-an-id"})))
+    status, body = _refusal(resp)
+    assert status == 400
+    assert body["code"] == "interactions-resume-malformed"
+    assert "'not-an-id'" in body["error"]
+    assert not caplog.records, [r.getMessage() for r in caplog.records]
+
+
+async def test_stream_resume_refuses_any_last_event_id_against_an_empty_stream_with_410(wired):
+    resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": "1-0"})))
+    status, body = _refusal(resp)
+    assert status == 410
+    assert body["code"] == "interactions-resume-expired"
+
+
+async def test_stream_resume_query_param_gets_the_same_refusals(wired):
+    await _seed_add_and_gap_answer(wired)
+    expired = await router.stream(cast(Request, _AliveRequest(alive=1, query_params={"last_event_id": "0-1"})))
+    malformed = await router.stream(cast(Request, _AliveRequest(alive=1, query_params={"last_event_id": "not-an-id"})))
+    assert _refusal(expired)[0] == 410
+    assert _refusal(malformed)[0] == 400
+
+
+_NOT_STREAM_IDS = (
+    "1_0-0",
+    "+5-0",
+    " 7-0",
+    "7-0 ",
+    "5--1",
+    "5-+1",
+    "\u0661-0",
+    "99999999999999999999-0",
+    "1-18446744073709551616",
+)
+
+
+@pytest.mark.parametrize("value", _NOT_STREAM_IDS)
+@pytest.mark.parametrize("door", ["header", "query"])
+async def test_stream_resume_refuses_a_value_that_is_not_a_stream_id_with_400(wired, value, door):
+    # Only ``<ms>`` or ``<ms>-<seq>`` in ASCII digits, each part an unsigned 64-bit
+    # integer, is a stream id; anything else is refused before any body.
+    await _seed_add_and_gap_answer(wired)
+    request = (
+        _AliveRequest(alive=1, headers={"last-event-id": value})
+        if door == "header"
+        else _AliveRequest(alive=1, query_params={"last_event_id": value})
+    )
+    status, body = _refusal(await router.stream(cast(Request, request)))
+    assert (status, body["code"]) == (400, "interactions-resume-malformed")
+
+
+async def test_stream_resume_accepts_the_largest_stream_id(wired):
     from starlette.responses import StreamingResponse
 
-    await _seed(wired, iid="i1", gid="g1")  # add event
-    prior = InteractionResponse(
-        interaction_id="i1", answer={}, answered_by="external-callback", answered_at=datetime.now(UTC)
-    )
-    await wired.store.record_answer(wired.fake, prior, "g1", reply_ttl=60, ticket="TKT", ticket_ttl=86400)
-    with caplog.at_level(logging.WARNING, logger="tai42_skeleton.routers.interactions"):
-        resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": "not-an-id"})))
-        assert isinstance(resp, StreamingResponse)
-        frames = [cast(str, f) async for f in resp.body_iterator]
-    # Fell back to the tail END: the gap answered frame is NOT replayed on the wire.
-    assert not [f for f in frames if _is_event(f, "interaction.answered")]
-    # Never silent: the malformed id is logged at WARNING.
-    assert any("malformed" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+    await _seed_add_and_gap_answer(wired)
+    top = 2**64 - 1
+    resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": f"{top}-{top}"})))
+    assert isinstance(resp, StreamingResponse)
+
+
+async def test_stream_empty_last_event_id_is_a_fresh_connect_from_the_tail(wired):
+    # An empty header is no resume: the stream opens at the tail end, so the event
+    # already in the stream is not replayed and a later one is delivered.
+    from starlette.responses import StreamingResponse
+
+    await _seed(wired, iid="old", gid="gold")
+    resp = await router.stream(cast(Request, _AliveRequest(alive=1, headers={"last-event-id": ""})))
+    assert isinstance(resp, StreamingResponse)
+    assert resp.status_code == 200
+    await _seed(wired, iid="new", gid="gnew")
+    frames = [cast(str, f) async for f in resp.body_iterator]
+    assert _add_ids(frames) == ["new"]
 
 
 async def test_restricted_stream_terminal_filtered_by_event_audience(wired):

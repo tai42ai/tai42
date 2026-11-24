@@ -13,6 +13,9 @@ that made it:
 * on the retrieval graph through its agent node;
 * at turn start through ``_repair_dangling_tool_calls``.
 
+An invalid call with no id or no name cannot be answered: it is dropped from the turn and
+logged, so no request carries it and no request carries a tool result without its call.
+
 The structured-output rail judges a broken structured call in-node, so that call is
 answered once, by the rail's re-prompt feedback, and never reaches the hook. A turn whose
 only calls are broken calls to other tools is an interim turn on a structured run too.
@@ -250,6 +253,8 @@ def test_invalid_call_with_an_empty_id_or_name_is_logged_and_cannot_be_answered(
         _run(_graph(model))
 
     assert [m.tool_call_id for m in model.seen[1] if isinstance(m, ToolMessage)] == ["ok"]
+    assert _orphan_results_anthropic(model.seen[1]) == set()
+    _assert_every_request_answers_every_call(model)
     assert any(r.getMessage() == expected for r in caplog.records)
 
 
@@ -909,6 +914,7 @@ def test_broken_call_without_a_name_is_logged_and_not_answered(caplog: pytest.Lo
 
     assert _answers(model.seen[1], "anon") == []
     assert _orphan_results_anthropic(model.seen[1]) == set()
+    _assert_every_request_answers_every_call(model)
     assert "anon" not in {event.call_id for event in events if isinstance(event, (ToolCallStep, ToolResultStep))}
     assert any("anon" in r.getMessage() and "no name here" in r.getMessage() for r in caplog.records)
 
@@ -926,4 +932,18 @@ def test_rail_feedback_does_not_answer_a_broken_call_without_a_name(
     assert _answers(model.seen[1], "anon") == []
     assert len(_answers(model.seen[1], "bad")) == 1
     assert _orphan_results_anthropic(model.seen[1]) == set()
+    _assert_every_request_answers_every_call(model)
+    assert any("anon" in r.getMessage() and "no name here" in r.getMessage() for r in caplog.records)
+
+
+def test_retrieval_graph_does_not_answer_a_broken_call_without_a_name(caplog: pytest.LogCaptureFixture) -> None:
+    turn = _with_nameless(tool_calls=[{"id": "ok", "name": "retrieve_tools", "args": {"query": "q"}}])
+    model = _Model([turn, _status("done")])
+
+    with caplog.at_level(logging.WARNING, logger=_RECOVERY_LOGGER):
+        _run(_retrieval_graph(model))
+
+    assert _answers(model.seen[1], "anon") == []
+    assert _orphan_results_anthropic(model.seen[1]) == set()
+    _assert_every_request_answers_every_call(model)
     assert any("anon" in r.getMessage() and "no name here" in r.getMessage() for r in caplog.records)

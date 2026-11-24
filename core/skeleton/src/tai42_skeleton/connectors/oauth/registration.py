@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
 from tai42_contract.errors import ErrorKind
-from tai42_kit.net import GuardedRequestError, UrlGuardError, guarded_request, is_loopback_host
+from tai42_contract.urls import is_loopback_host
+from tai42_kit.net import GuardedRequestError, UrlGuardError, guarded_request
 
 from tai42_skeleton.connectors.oauth.client import (
     CLIENT_AUTH_METHODS,

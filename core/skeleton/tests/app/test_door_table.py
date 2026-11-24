@@ -24,6 +24,7 @@ def _meta(path: str, methods: list[str], *, max_body_bytes: int | None = None) -
         response_model=None,
         reload_gated=False,
         holds_writer_exit=False,
+        answers_leaving=False,
         reads_body=False,
         error_statuses=(),
         success_status=200,

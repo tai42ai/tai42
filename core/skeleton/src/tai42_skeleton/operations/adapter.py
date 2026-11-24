@@ -26,6 +26,7 @@ from starlette.types import Message
 from tai42_contract.errors import OperationError
 
 from tai42_skeleton.app.route_registry import DeclaredRouteMetadata, RouteAction
+from tai42_skeleton.app.writer_exit import WorkerLeavingError
 from tai42_skeleton.operations.errors import BadRequestError
 
 if TYPE_CHECKING:
@@ -190,22 +191,25 @@ def _declared_metadata(
 
     ``error_statuses`` are the statuses answered with the plain ``{"error": ...}``
     envelope this adapter renders: the operation's own typed errors, plus the ``401``
-    the auth edge answers for an authed route. The reload gate's ``503`` is NOT among
-    them — it answers a different body (the constant-message reloading envelope with a
-    ``Retry-After`` header), and ``reload_gated`` already declares it, so the emitter
-    owns that response. The leaving ``503`` is declared by ``holds_writer_exit``, from which
-    the registry derives the status, as ``authed`` gives the ``401``.
+    the auth edge answers for an authed route. Two ``503`` answers with bodies of their own
+    are NOT among them, each declared by its own flag so the emitter publishes its shape: the
+    reload gate's (the constant-message reloading envelope with a ``Retry-After`` header),
+    declared by ``reload_gated``; and the leaving refusal (``{"error": …, "leaving": …}``),
+    declared by ``answers_leaving`` for an operation that names :class:`WorkerLeavingError`
+    among its errors, and implied for every route holding the writer's exit.
 
     ``request_model`` is the model published for THIS route, so ``reads_body`` follows
     the shape the route actually documents.
     """
-    statuses: set[int] = {cls.status for cls in op.error_classes}
+    answers_leaving = any(issubclass(cls, WorkerLeavingError) for cls in op.error_classes)
+    statuses: set[int] = {cls.status for cls in op.error_classes if not issubclass(cls, WorkerLeavingError)}
     if authed:
         statuses.add(401)
     reads_body = request_model is not None and method in _BODY_METHODS
     return DeclaredRouteMetadata(
         reload_gated=op.reload_gated,
         holds_writer_exit=op.holds_writer_exit,
+        answers_leaving=answers_leaving,
         reads_body=reads_body,
         error_statuses=tuple(sorted(statuses)),
         success_status=success_status,

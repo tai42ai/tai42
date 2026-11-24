@@ -18,6 +18,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from tai42_contract.urls import is_loopback_host
+
 
 class MediaKind(StrEnum):
     """How a media item renders: an inline image, a file bubble, or a labelled link."""
@@ -64,12 +66,6 @@ _DATA_IMAGE_PREFIX = "data:image/"
 # is a stored-media reference — a valid image url. Shared by the skeleton (the
 # serve route) and the channels (absolute-url minting).
 MEDIA_ROUTE_PREFIX = "/api/interactions/media/"
-
-# Loopback hosts for which an http (non-TLS) served-media base URL is admitted —
-# every other host must be https. ``InteractionsSettings.public_base_url``'s
-# validator imports this set: an http served reference validated here is minted
-# from that base, so the two admit exactly the same hosts.
-LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 _DNS_LABEL = re.compile(r"[A-Za-z0-9-]{1,63}")
 
@@ -158,13 +154,13 @@ def _is_served_media_url(value: str) -> bool:
     # An absolute served-media reference: a well-formed absolute http(s) URL (host,
     # port and userinfo judged by ``_is_absolute_web_url``) whose path is exactly
     # ``MEDIA_ROUTE_PREFIX`` + a 43-char stored-media id, with no query or fragment.
-    # http is admitted only when the host is a loopback host (``LOCAL_HTTP_HOSTS``),
-    # because such a base is minted from ``InteractionsSettings.public_base_url``,
-    # whose validator restricts http to those same hosts; https keeps any valid host.
+    # http is admitted only when the host is a loopback host, because such a base is
+    # minted from the deployment public address, whose validator admits http through
+    # the same ``is_loopback_host`` predicate; https keeps any valid host.
     if not _is_absolute_web_url(value, schemes=("http", "https")):
         return False
     split = urlsplit(value)
-    if split.scheme == "http" and split.hostname not in LOCAL_HTTP_HOSTS:
+    if split.scheme == "http" and not is_loopback_host(split.hostname or ""):
         return False
     if split.query or split.fragment or not split.path.startswith(MEDIA_ROUTE_PREFIX):
         return False
@@ -176,7 +172,7 @@ def served_media_id(url: str) -> str | None:
 
     Handles BOTH forms a request may carry: the same-origin relative
     ``{MEDIA_ROUTE_PREFIX}{id}`` an inbox ask stores, and the absolute ``http(s)``
-    served reference a channel send mints from ``public_base_url``. The prefix is
+    served reference a channel send mints from ``TAI_PUBLIC_BASE_URL``. The prefix is
     located by parsing (the relative-form ``startswith``, the absolute-form url
     ``path``), never by substring search — so a prefix buried in a query or fragment
     is not mistaken for a served id.
@@ -214,7 +210,7 @@ def _validate_file_media_url(url: str, kind: MediaKind) -> None:
         # charset+length is the whole check (no host, relative path).
         pass
     elif _is_served_media_url(url):
-        # An absolute served reference a channel send mints from public_base_url;
+        # An absolute served reference a channel send mints from TAI_PUBLIC_BASE_URL;
         # http is allowed only here (that base is loopback-restricted at settings).
         if len(url) > MEDIA_URL_MAX_CHARS:
             raise ValueError(f"{kind_name} media url must be at most {MEDIA_URL_MAX_CHARS} characters, got {len(url)}")
@@ -235,7 +231,7 @@ class MediaItem(BaseModel):
     kind (``image``/``document``/``video``/``audio``) must be an absolute ``https`` URL, a
     same-origin ``{MEDIA_ROUTE_PREFIX}{id}`` reference to media the skeleton serves by id, or an
     absolute ``http(s)`` served reference of that same ``{MEDIA_ROUTE_PREFIX}{id}`` path a
-    channel send mints from ``public_base_url`` (remote file media is https-only: the inbox CSP
+    channel send mints from ``TAI_PUBLIC_BASE_URL`` (remote file media is https-only: the inbox CSP
     ``img-src`` admits ``https:``/``data:`` and same-origin but not ``http:``, so an ``http:``
     remote source would be an unrenderable record); ``image`` ADDITIONALLY admits an inline
     ``data:image/*`` URI — that inline form is image-only, a ``data:`` URI on any other file

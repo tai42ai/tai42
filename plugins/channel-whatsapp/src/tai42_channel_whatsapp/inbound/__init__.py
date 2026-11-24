@@ -23,7 +23,8 @@ token prefix before any pending-question lookup.
 Importing this package registers the webhook route AND the Flow data endpoint as
 side-effects (via ``.webhook`` and ``.flow_data``); the modules below hold the door
 authentication, payload traversal, message routing, reply/status handling, the
-Flow data endpoint of an endpoint-driven form, and its ``data_exchange`` step.
+Flow data endpoint of an endpoint-driven form, its ``data_exchange`` step, the values that step
+carries and the form's screen geometry it reads them through.
 """
 
 from tai42_channel_whatsapp.inbound import flow_data, webhook  # noqa: F401  (route registration side-effects)

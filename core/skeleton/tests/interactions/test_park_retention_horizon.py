@@ -17,6 +17,8 @@ from tai42_skeleton.interactions.ask.timing import DeadlineWindow, mint_callback
 from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.interactions.store.ttl import _key_ttl
 
+from .._helpers import set_public_base_url
+
 _IDLE = 100
 
 
@@ -73,8 +75,9 @@ async def test_add_gives_every_park_key_the_horizon(fake_redis):
         assert 300 + _IDLE - 1 <= await fake_redis.ttl(key) <= 300 + _IDLE, key
 
 
-def test_an_async_park_ticket_lives_one_horizon_past_its_deadline():
-    settings = InteractionsSettings(public_base_url="https://host.example", idle_ttl_seconds=_IDLE)
+def test_an_async_park_ticket_lives_one_horizon_past_its_deadline(monkeypatch):
+    set_public_base_url(monkeypatch, "https://host.example")
+    settings = InteractionsSettings(idle_ttl_seconds=_IDLE)
     now = datetime.now(UTC)
     window = DeadlineWindow(budget=60.0, created_at=now, timeout_at=now + timedelta(seconds=300), deadline=0.0)
 
@@ -84,8 +87,9 @@ def test_an_async_park_ticket_lives_one_horizon_past_its_deadline():
     assert ticket.ticket_ttl == 300 + _IDLE
 
 
-def test_a_sync_question_ticket_lives_to_its_deadline():
-    settings = InteractionsSettings(public_base_url="https://host.example", idle_ttl_seconds=_IDLE)
+def test_a_sync_question_ticket_lives_to_its_deadline(monkeypatch):
+    set_public_base_url(monkeypatch, "https://host.example")
+    settings = InteractionsSettings(idle_ttl_seconds=_IDLE)
     now = datetime.now(UTC)
     window = DeadlineWindow(budget=60.0, created_at=now, timeout_at=now + timedelta(seconds=60), deadline=0.0)
 

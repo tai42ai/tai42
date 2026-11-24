@@ -1,6 +1,6 @@
 """The MCP door on the assembled app (``create_app`` served by uvicorn), in every served shape.
 
-A declaring identity provider and ``ACCESS_CONTROL_PUBLIC_BASE_URL`` turn the door on. Each
+A declaring identity provider and ``TAI_PUBLIC_BASE_URL`` turn the door on. Each
 shape checks the pointer an unauthenticated request gets and the document it points at: the
 streamable, stateless and SSE boots, a sub-MCP app of each transport, a reload of a
 streamable and of an SSE boot, the Studio routes mounted, access control off, and the app
@@ -64,7 +64,7 @@ def provider(monkeypatch: pytest.MonkeyPatch) -> DeclaringTokenProvider:
     access.pg.add_policy(STATIC_USER, scopes=["*"])
     declaring = DeclaringTokenProvider()
     install_declaring_provider(monkeypatch, declaring)
-    monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
+    monkeypatch.setenv("TAI_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
     monkeypatch.setattr(app.config.config_manager, "read_env", dict)
     return declaring
 
@@ -166,7 +166,7 @@ async def test_a_reload_keeps_the_door(
 async def test_with_access_control_off_nothing_is_advertised(monkeypatch: pytest.MonkeyPatch) -> None:
     install_declaring_provider(monkeypatch, DeclaringTokenProvider())
     monkeypatch.setenv("ACCESS_CONTROL_ENABLE", "false")
-    monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
+    monkeypatch.setenv("TAI_PUBLIC_BASE_URL", PUBLIC_BASE_URL)
     async with served(monkeypatch, manifest("none")) as server, _client(server.base_url) as client:
         admitted = await _refused_post(client, "/mcp")
         document = await client.get(f"{DOC}/mcp")
@@ -178,7 +178,7 @@ async def test_with_access_control_off_nothing_is_advertised(monkeypatch: pytest
 @pytest.mark.usefixtures("provider")
 async def test_embedded_under_a_prefix_the_pointer_and_the_document_carry_it(monkeypatch: pytest.MonkeyPatch) -> None:
     base = f"{PUBLIC_BASE_URL}/host"
-    monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", base)
+    monkeypatch.setenv("TAI_PUBLIC_BASE_URL", base)
     async with served(monkeypatch, manifest("none"), prefix="/host") as server:
         await _register("http-svc", "http")
         await _register("sse-svc", "sse")
@@ -202,7 +202,7 @@ async def test_embedded_under_a_prefix_the_pointer_and_the_document_carry_it(mon
 async def test_an_sse_boot_embedded_under_a_prefix_holds_a_session_with_the_door_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ACCESS_CONTROL_PUBLIC_BASE_URL", f"{PUBLIC_BASE_URL}/host")
+    monkeypatch.setenv("TAI_PUBLIC_BASE_URL", f"{PUBLIC_BASE_URL}/host")
     async with served(monkeypatch, manifest("none"), transport="sse", prefix="/host") as server:
         assert TOOL_NAME in await sse_session_tools(f"{server.base_url}/sse", bearer(STATIC_TOKEN), ResponseLog())
 

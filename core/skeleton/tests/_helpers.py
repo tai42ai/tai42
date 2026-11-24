@@ -12,6 +12,16 @@ from tai42_contract.template import TemplatedText
 
 from tai42_skeleton.app import bus_settings as bus_settings_module
 from tai42_skeleton.config.deployment_env import capture_deployment_env, reset_deployment_env
+from tai42_skeleton.settings.public_base_url import public_base_url_settings
+
+
+def set_public_base_url(monkeypatch: pytest.MonkeyPatch, value: str | None) -> None:
+    """Set (or unset) ``TAI_PUBLIC_BASE_URL`` and drop its cached settings so the next read sees it."""
+    if value is None:
+        monkeypatch.delenv("TAI_PUBLIC_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("TAI_PUBLIC_BASE_URL", value)
+    public_base_url_settings.cache_clear()
 
 
 def recapture_deployment_env() -> None:

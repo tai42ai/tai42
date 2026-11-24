@@ -67,6 +67,10 @@ class DeclaredRouteMetadata:
     #: worker's exit from before the handler runs (``WriterExitScope.hold_exit``) and refuses it on a
     #: worker that decided to leave (``WorkerLeavingError``, 503).
     holds_writer_exit: bool = False
+    #: Whether the route answers the leaving ``503`` (``{"error": …, "leaving": <reason>}``) without
+    #: holding the writer's exit itself: it relays the refusal of a change it runs. A route that holds
+    #: the writer's exit answers it too, whatever this says.
+    answers_leaving: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,6 +225,16 @@ class AppHttp(Protocol):
         self-referential path) so a remapped base is followed instead of a
         hardcoded default. Called with no binding present — a core or
         operator-authored module — it raises: those modules own no declared mount.
+        """
+        ...
+
+    def public_base_url(self) -> str | None:
+        """The deployment's public address as the deployment declares it (``TAI_PUBLIC_BASE_URL``).
+
+        Normalised (scheme and host lower-cased, a default port dropped), with no trailing
+        slash, so a path joins it directly (``f"{base}{mount_base}/inbound"``); ``None`` while
+        the deployment declares none. A component that hands a vendor an absolute URL of this
+        deployment (a webhook registration, a redirect URI) builds it from this value.
         """
         ...
 

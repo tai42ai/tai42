@@ -4,7 +4,7 @@ The signed-URL medium (twilio) computes its X-Twilio-Signature over the origin t
 inbound door reconstructs. Mock legs reach the door over replica-B loopback; a real
 inbound leg reaches it over the public origin. The gate is THIS case's OWN medium
 running real (``settings.is_real(self.name)``), NOT the stack-wide public-base-URL
-routing: ``public_base_url_env_keys`` carries ``INTERACTIONS_PUBLIC_BASE_URL`` whenever
+routing: ``public_base_url_env_keys`` carries ``TAI_PUBLIC_BASE_URL`` whenever
 ANY channel seam is real, so in a mixed session (real telegram + mock twilio) gating on
 that key would make the mock twilio leg sign over the public origin while POSTing to
 loopback — a 401. And ``public_base_url`` alone can't gate it either: the manifest
@@ -50,7 +50,7 @@ def test_mock_leg_binds_loopback_even_with_public_base_url_set() -> None:
 
 def test_mixed_session_other_channel_real_keeps_twilio_loopback() -> None:
     # The mixed-session bug: a DIFFERENT channel runs real (real telegram), so the stack
-    # routes INTERACTIONS_PUBLIC_BASE_URL stack-wide — yet twilio itself is mock and its
+    # routes TAI_PUBLIC_BASE_URL stack-wide — yet twilio itself is mock and its
     # door reaches over loopback. Gating on this medium's own real leg keeps it loopback,
     # so its signature matches the loopback POST.
     case = _case(public_base_url="https://e2e.example", real=("telegram",))

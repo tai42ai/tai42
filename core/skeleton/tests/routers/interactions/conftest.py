@@ -13,6 +13,8 @@ from tai42_skeleton.interactions.settings import InteractionsSettings
 from tai42_skeleton.operations import interactions as ops
 from tai42_skeleton.routers import interactions as router
 
+from ..._helpers import set_public_base_url
+
 
 @pytest.fixture(autouse=True)
 def _interactions_store_configured(monkeypatch):
@@ -24,7 +26,8 @@ def _interactions_store_configured(monkeypatch):
 
 @pytest.fixture
 def wired(monkeypatch, fake_redis, fake_client_ctx):
-    settings = InteractionsSettings(public_base_url="https://cb.example")
+    set_public_base_url(monkeypatch, "https://cb.example")
+    settings = InteractionsSettings()
     monkeypatch.setattr(router, "client_ctx", fake_client_ctx)
     monkeypatch.setattr(router, "interactions_settings", lambda: settings)
     # The answer door is an operation in ``operations.interactions``; it reads

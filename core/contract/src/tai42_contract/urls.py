@@ -1,15 +1,16 @@
-"""Single-line http(s) URL validation shared across the contract.
+"""URL validation shared by the contract and the packages above it.
 
-``check_web_url`` is the one URL check used by both the plugin spec
-(``PluginSpec.icon``/``homepage``/``repository``) and the connector
-``ProviderDescriptor.icon_url``. It lives below both so neither module owns the
-other's rule and there is no import cycle. The injection-character detection it
-needs — the terminal-escape / line-overwrite / Trojan-Source spoofing class —
-is defined here too so it has a single home.
+``check_web_url`` is the one single-line http(s) URL check (the plugin spec's
+``icon``/``homepage``/``repository`` and the connector ``ProviderDescriptor``
+URLs). ``is_loopback_host`` is the one answer to "does this host name this
+machine", which every http-on-loopback admission asks. The injection-character
+detection ``check_web_url`` needs — the terminal-escape / line-overwrite /
+Trojan-Source spoofing class — is defined here too so it has a single home.
 """
 
 from __future__ import annotations
 
+from ipaddress import ip_address
 from urllib.parse import urlsplit
 
 # Unicode line/paragraph separators that a naive ``"\n" in value`` check misses
@@ -82,3 +83,19 @@ def check_web_url(value: str, *, field: str, schemes: tuple[str, ...]) -> str:
     if not split.hostname or "@" in split.netloc:
         raise ValueError(f"{field} must include a host and no embedded credentials")
     return value
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether ``host`` names this machine: ``localhost`` or an IP literal ``ipaddress`` calls loopback.
+
+    ``ipaddress``'s ``is_loopback`` decides every literal: ``127.0.0.0/8``,
+    ``::1`` and an IPv4-mapped loopback address (``::ffff:127.0.0.1``).
+    ``localhost`` matches case-insensitively and a bracketed IPv6 literal
+    (``[::1]``) is read without its brackets; any other host is not loopback.
+    """
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False

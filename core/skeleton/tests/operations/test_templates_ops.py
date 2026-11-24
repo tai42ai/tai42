@@ -20,7 +20,7 @@ import pytest
 from pydantic import ValidationError
 from tai42_contract.errors import OperationError
 from tai42_contract.manifest import ApiToolsConfig
-from tai42_contract.template import TemplatedText, TemplateEviction
+from tai42_contract.template import TemplatedText, TemplateEviction, TemplateNotFoundError
 
 import tai42_skeleton.operations.templates as templates_ops
 from tai42_skeleton.app import instance
@@ -51,7 +51,6 @@ from tai42_skeleton.template import (
     HolderUnreadableError,
     PartialDirectoryDeleteError,
     ResourceManager,
-    TemplateNotFoundError,
 )
 
 from .._fakes.bus import FakeBus
@@ -597,7 +596,9 @@ async def test_render_template_missing_id_is_not_found(
     manager: _ResourceManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _missing(text, locale=None) -> str:
-        raise TemplateNotFoundError(f"Template '{text.id}' not found.")
+        raise TemplateNotFoundError(
+            f"references stored id {text.id!r}, which could not be fetched: Template {text.id!r} not found."
+        )
 
     monkeypatch.setattr(manager, "render_templated_text", _missing)
     with pytest.raises(NotFoundError, match=r"gone\.j2"):

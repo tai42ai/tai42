@@ -26,7 +26,7 @@ pytestmark = [
         "helper:channel-fake:twilio",
         "setting:channel-inbound-secrets",
         "setting:channel-allowed-recipients",
-        "setting:INTERACTIONS_PUBLIC_BASE_URL",
+        "setting:TAI_PUBLIC_BASE_URL",
     ),
 ]
 

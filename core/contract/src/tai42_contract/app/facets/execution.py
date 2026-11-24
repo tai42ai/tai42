@@ -129,7 +129,12 @@ class AppStorage(Protocol):
 
     @property
     def resource_manager(self) -> Any:
-        """The active resource manager (impl type; loads/renders content over storage)."""
+        """The active resource manager (impl type; loads/renders content over storage).
+
+        Its ``render_templated_text(text, locale)`` raises a
+        :class:`~tai42_contract.template.TemplateRenderError` for a templated text that cannot be
+        rendered as authored and lets every other failure propagate as itself.
+        """
         ...
 
     async def resolve_image(self, source: str | bytes) -> ImageReference:

@@ -33,12 +33,15 @@ class InboundRejectionReason(StrEnum):
     Rides the ``reason`` of :meth:`~tai42_contract.app.facets.messaging.AppConversations.notify_inbound_rejected`;
     the participant-facing copy per reason lives in the skeleton impl (never in this vocabulary module).
     ``UNREADABLE`` is a content the channel recognises but whose body it cannot read.
+    ``CHOICE_UNAVAILABLE`` is a tap on an inline choice whose message or label the channel can no
+    longer read.
     """
 
     UNSUPPORTED_TYPE = "unsupported_type"
     TOO_LARGE = "too_large"
     COULD_NOT_RECEIVE = "could_not_receive"
     UNREADABLE = "unreadable"
+    CHOICE_UNAVAILABLE = "choice_unavailable"
 
 
 MEDIA_KIND_PARAM = "media_kind"

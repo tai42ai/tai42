@@ -248,7 +248,7 @@ per-case controls (a `visibleWhen` shown for several values) — publishes as an
 the platform's one form-shape check on the screen (refusing a broken shape on the
 screen with the field's sentence), then calls the platform's one reaction
 chokepoint for a declared trigger, and returns the resulting form update (set
-values, replaced choice lists, per-field errors, or a computed display slot) back
+or cleared values, replaced choice lists, per-field errors, or a computed display slot) back
 to the open Flow — the plugin only translates the vendor wire to and from those
 two seams and holds no logic of its own. A reaction that fails or times out
 surfaces as a generic error on the Flow and a loud server log, never a stale

@@ -225,14 +225,13 @@ class StackConfig:
     extra_allowlist_origins: list[str] = field(default_factory=list)
     # Env keys that must carry the SINGLE replica-B loopback origin
     # (``http://host:port_b``), only known after boot allocates the ports — the
-    # channel profile pins ``INTERACTIONS_PUBLIC_BASE_URL`` (so an ask minted on
-    # replica A is answered through the callback door on replica B) and the
-    # telegram ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL`` (the setWebhook URL) at B.
+    # channel profile pins ``TAI_PUBLIC_BASE_URL`` at B (so an ask minted on
+    # replica A is answered through the callback door on replica B, and telegram's
+    # setWebhook URL points at B).
     # Only meaningful on a REPLICAS stack (two app ports).
     replica_b_origin_env_keys: list[str] = field(default_factory=list)
     # The REAL-inbound public-URL fill (empty on every mock leg). A real inbound
-    # leg lists here the public-base-URL env keys (e.g. ``INTERACTIONS_PUBLIC_BASE_URL``,
-    # ``CHANNEL_TELEGRAM_PUBLIC_BASE_URL``)
+    # leg lists here the public-base-URL env keys (e.g. ``TAI_PUBLIC_BASE_URL``)
     # that must carry ``E2E_PUBLIC_BASE_URL`` — the origin the vendor calls back on —
     # instead of the replica-B loopback origin (loopback is unreachable from the
     # vendor). Keys named here OVERRIDE the loopback fill, so a leg opts a key into
@@ -252,7 +251,7 @@ class StackConfig:
     public_allowlist_env_keys: list[str] = field(default_factory=list)
     # Env keys that must carry THIS stack's own single app origin (``http://host:port``),
     # only known after boot — the single-port (MULTIWORKER) analogue of
-    # ``replica_b_origin_env_keys``. The studio profile pins ``INTERACTIONS_PUBLIC_BASE_URL``
+    # ``replica_b_origin_env_keys``. The studio profile pins ``TAI_PUBLIC_BASE_URL``
     # here so an ask callback ticket it mints is reachable back on its own origin (the
     # web channel's answer door FORWARDS the answer to that callback URL — a loopback
     # origin resolves, an off-host placeholder does not). Filled from the first app port.

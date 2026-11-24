@@ -327,15 +327,23 @@ def rejection_wired(monkeypatch):
     app._channel_registry.reset()
 
 
-@pytest.mark.parametrize(
-    ("reason", "copy"),
-    [
-        (InboundRejectionReason.UNSUPPORTED_TYPE, "This content type is not supported here."),
-        (InboundRejectionReason.TOO_LARGE, "That file is too large to accept here."),
-        (InboundRejectionReason.COULD_NOT_RECEIVE, "That attachment could not be received."),
-        (InboundRejectionReason.UNREADABLE, "That message could not be read. Please send it again."),
-    ],
-)
+_REASON_COPY = [
+    (InboundRejectionReason.UNSUPPORTED_TYPE, "This content type is not supported here."),
+    (InboundRejectionReason.TOO_LARGE, "That file is too large to accept here."),
+    (InboundRejectionReason.COULD_NOT_RECEIVE, "That attachment could not be received."),
+    (InboundRejectionReason.UNREADABLE, "That message could not be read. Please send it again."),
+    (
+        InboundRejectionReason.CHOICE_UNAVAILABLE,
+        "That choice is no longer available. Please type your reply as a message.",
+    ),
+]
+
+
+def test_every_reason_has_a_case_in_the_reason_copy_table():
+    assert {reason for reason, _ in _REASON_COPY} == set(InboundRejectionReason)
+
+
+@pytest.mark.parametrize(("reason", "copy"), _REASON_COPY)
 async def test_notify_inbound_rejected_replies_with_the_reason_copy(rejection_wired, reason, copy):
     await tai42_app.conversations.notify_inbound_rejected(
         channel_id="fakechan",

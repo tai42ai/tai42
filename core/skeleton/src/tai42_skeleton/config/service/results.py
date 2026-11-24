@@ -35,19 +35,6 @@ def joined_span_release_errors(*errors: str | None) -> str | None:
     return "; ".join(error for error in errors if error is not None) or None
 
 
-class OrphanEnvWriteError(RuntimeError):
-    """A combined env+manifest op whose manifest persist FAILED after the env write already landed.
-
-    Env-first/manifest-second ordering: on a manifest-persist failure there is NO
-    rollback — the env write STANDS as an inert, re-runnable orphan (rolling it back
-    could leave a still-referenced marker resolving silently to ``"N/A"``). The message
-    NAMES the orphan env key(s) and the manifest pointer they now reference no persisted
-    marker at, and states the env write stands / re-run to complete. A ``RuntimeError``
-    (not a ``ValueError``) so the op layer does not fold it into a 400 — a partial
-    failure is loud, not a client input error.
-    """
-
-
 class _ManifestStore(Protocol):
     """The config-manager surface the pipeline drives.
 

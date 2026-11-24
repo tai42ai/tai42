@@ -33,6 +33,8 @@ from tai42_kit.settings import reset_all_settings
 
 from . import probe_store
 
+pytestmark = pytest.mark.usefixtures("noop_monitoring")
+
 DOC = {"title": "document", "a": "a" * 600, "b": "b" * 600}
 
 

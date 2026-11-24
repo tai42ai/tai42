@@ -27,17 +27,17 @@ from tai42_contract.tools import ReferenceHolder
 from tai42_skeleton.app import instance
 from tai42_skeleton.backup.sections import _import_env, _import_manifest
 from tai42_skeleton.config.service import ConfigService
+from tai42_skeleton.config.service.selection_holders import refuse_held_unpicks, unpick_holders
 from tai42_skeleton.operations import BadRequestError, ConflictError, UpstreamError
 from tai42_skeleton.operations import config as config_ops
 from tai42_skeleton.operations import manifest as manifest_ops
 from tai42_skeleton.operations import settings_profiles as profile_ops
-from tai42_skeleton.operations.manifest.selection_holders import refuse_held_unpicks, unpick_holders
 from tai42_skeleton.operations.reference_graph import StoredPresets
 from tai42_skeleton.tools.mcp_start import StartId
 
-from ..._fakes.bus import FakeBus
-from ..._fakes.caller_reach import bound_caller
-from ...config.fake_pipeline import FakeConfigStore, FakeReloadAdmin, _service, _with_bus
+from .._fakes.bus import FakeBus
+from .._fakes.caller_reach import bound_caller
+from .fake_pipeline import FakeConfigStore, FakeReloadAdmin, _service, _with_bus
 
 # Every door here is exercised for an admin caller, who reads each holder by name.
 pytestmark = pytest.mark.usefixtures("admin_caller")

@@ -2,45 +2,18 @@ import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { mountRoot, okUpdate, reactions, stubFetch } from '@/form-reaction.test-support';
 import { formQuestion, renderCard } from '@/question-card.test-support';
-import type { DisplayBlock, FormPage, FormReactions, JsonSchema } from '@/transcript-model';
-
-// The reaction-door URL template the page door writes onto `#root` — the per-interaction
-// react sibling of this plugin's own answer door, with the `{interaction_id}` placeholder.
-const REACTION_ENDPOINT = '/api/channels/web/questions/{interaction_id}/react';
-
-/** A mount carrying the reaction-endpoint template, so `reactToForm` finds its door. */
-function mountRoot(endpoint: string | null = REACTION_ENDPOINT): void {
-  const root = document.createElement('div');
-  root.id = 'root';
-  if (endpoint !== null) root.dataset.reactionEndpoint = endpoint;
-  document.body.appendChild(root);
-}
-
-/** A reaction door 2xx carrying a form update under the platform `{data}` envelope. */
-function okUpdate(update: Record<string, unknown>): Response {
-  return { ok: true, status: 200, text: async () => JSON.stringify({ data: update }) } as Response;
-}
+import type { DisplayBlock, FormPage, JsonSchema } from '@/transcript-model';
 
 /** A reaction door refusal carrying the platform `{error}` envelope. */
 function doorError(status: number, error: string): Response {
   return { ok: false, status, text: async () => JSON.stringify({ error }) } as Response;
 }
 
-/** A full reactions declaration from the parts a case cares about. */
-function reactions(overrides: Partial<FormReactions> = {}): FormReactions {
-  return { fieldChanged: [], pageAdvanced: [], submitted: false, choices: [], ...overrides };
-}
-
 /** A display block with every optional field explicit (as the parser yields it). */
 function block(partial: Partial<DisplayBlock> & { kind: DisplayBlock['kind'] }): DisplayBlock {
   return { text: null, src: null, alt: null, slot: null, ...partial };
-}
-
-function stubFetch(response: Response): ReturnType<typeof vi.fn> {
-  const fetchMock = vi.fn().mockResolvedValue(response);
-  vi.stubGlobal('fetch', fetchMock);
-  return fetchMock;
 }
 
 /** A promise a case resolves by hand, so two reaction round-trips can be made to
@@ -104,6 +77,53 @@ describe('SchemaFormAnswer reactions', () => {
     await waitFor(() => expect(screen.getByTestId('form-slot-total')).toHaveTextContent('42'));
   });
 
+  it('shows the required sentence for a required field a reaction cleared', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ values: { qty: null } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { qty: { type: 'string', title: 'Qty' } },
+      required: ['qty'],
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(schema, null, null, reactions({ fieldChanged: ['qty'] })),
+    );
+
+    await user.type(screen.getByRole('textbox'), 'x');
+    await waitFor(() => expect(screen.getByRole('textbox')).toHaveValue(''));
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(screen.getByText('"qty" is required')).toBeInTheDocument());
+    expect(screen.queryByText('must not be null')).not.toBeInTheDocument();
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it('answers without an optional field a reaction cleared', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ values: { note: null } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        qty: { type: 'string', title: 'Qty' },
+        note: { type: 'string', title: 'Note' },
+      },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { note: 'hi' }, options: {} },
+        null,
+        reactions({ fieldChanged: ['qty'] }),
+      ),
+    );
+
+    await user.type(screen.getByRole('textbox', { name: 'Qty' }), 'x');
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Note' })).toHaveValue(''));
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith('int-1', { qty: 'x' }));
+  });
+
   it('replaces a field choice list from a reaction update', async () => {
     const user = userEvent.setup();
     stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
@@ -129,6 +149,188 @@ describe('SchemaFormAnswer reactions', () => {
     // The reaction's choice list REPLACES the send's: Green in, Red gone.
     await waitFor(() => expect(screen.getByRole('option', { name: 'Green' })).toBeInTheDocument());
     expect(screen.queryByRole('option', { name: 'Red' })).not.toBeInTheDocument();
+  });
+
+  it('clears a picked choice the replaced list no longer offers, so the visitor picks again', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        qty: { type: 'string', title: 'Qty' },
+        colour: { type: 'string', title: 'Colour' },
+      },
+      required: ['colour'],
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        null,
+        reactions({ fieldChanged: ['qty'], choices: ['colour'] }),
+      ),
+    );
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Colour' }), 'r');
+    await user.type(screen.getByRole('textbox', { name: 'Qty' }), 'x');
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Green' })).toBeInTheDocument());
+
+    // Red is gone from the list, so the select is back on its placeholder, not on Red.
+    expect(screen.getByRole('combobox', { name: 'Colour' })).toHaveValue('');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+    await waitFor(() => expect(screen.getByText('"colour" is required')).toBeInTheDocument());
+    expect(screen.queryByText('must be one of the allowed values')).not.toBeInTheDocument();
+    expect(onAnswer).not.toHaveBeenCalled();
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Colour' }), 'g');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith('int-1', { qty: 'x', colour: 'g' }));
+  });
+
+  it("posts a reaction's choice that is outside the schema's own enum", async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        qty: { type: 'string', title: 'Qty' },
+        colour: { type: 'string', title: 'Colour', enum: ['r'] },
+      },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        null,
+        reactions({ fieldChanged: ['qty'], choices: ['colour'] }),
+      ),
+    );
+
+    await user.type(screen.getByRole('textbox'), 'x');
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Green' })).toBeInTheDocument());
+    await user.selectOptions(screen.getByRole('combobox'), 'g');
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith('int-1', { qty: 'x', colour: 'g' }));
+  });
+
+  it("posts a submit reaction's set value and drops a choice its replaced list no longer offers", async () => {
+    const user = userEvent.setup();
+    stubFetch(
+      okUpdate({
+        values: { colour: 'g' },
+        options: {
+          colour: [{ value: 'g', label: 'Green' }],
+          size: [{ value: 'm', label: 'Medium' }],
+        },
+      }),
+    );
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        colour: { type: 'string', title: 'Colour', enum: ['r'] },
+        size: { type: 'string', title: 'Size' },
+      },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        {
+          values: { colour: 'r', size: 's' },
+          options: {
+            colour: [{ value: 'r', label: 'Red' }],
+            size: [{ value: 's', label: 'Small' }],
+          },
+        },
+        null,
+        reactions({ submitted: true, choices: ['colour', 'size'] }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith('int-1', { colour: 'g' }));
+  });
+
+  it('posts an optional choice a submit reaction no longer offers as unfilled', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        qty: { type: 'string', title: 'Qty' },
+        colour: { type: 'string', title: 'Colour' },
+      },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { qty: 'x', colour: 'r' }, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        null,
+        reactions({ submitted: true, choices: ['colour'] }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledWith('int-1', { qty: 'x' }));
+  });
+
+  it('holds the form on a required choice a submit reaction no longer offers', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour' } },
+      required: ['colour'],
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { colour: 'r' }, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        null,
+        reactions({ submitted: true, choices: ['colour'] }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(screen.getByText('"colour" is required')).toBeInTheDocument());
+    expect(screen.queryByText('must be one of the allowed values')).not.toBeInTheDocument();
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it("advances a step past a reaction's choice that is outside the schema's own enum", async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        qty: { type: 'string', title: 'Qty' },
+        colour: { type: 'string', title: 'Colour', enum: ['r'] },
+        note: { type: 'string', title: 'Note' },
+      },
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'Pick', fields: ['qty', 'colour'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Say', fields: ['note'], display: [], kind: 'input', buttonLabel: null },
+    ];
+    renderCard(
+      formQuestion(
+        schema,
+        { values: {}, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        pages,
+        reactions({ fieldChanged: ['qty'], choices: ['colour'] }),
+      ),
+    );
+
+    await user.type(screen.getByRole('textbox'), 'x');
+    await waitFor(() => expect(screen.getByRole('option', { name: 'Green' })).toBeInTheDocument());
+    await user.selectOptions(screen.getByRole('combobox'), 'g');
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+
+    expect(await screen.findByRole('textbox', { name: 'Note' })).toBeInTheDocument();
   });
 
   it('holds the form open when a submitted reaction returns per-field errors', async () => {
@@ -182,6 +384,111 @@ describe('SchemaFormAnswer reactions', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('answers without an optional field the submitted reaction cleared', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ values: { note: null } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        qty: { type: 'string', title: 'Qty' },
+        note: { type: 'string', title: 'Note' },
+      },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { qty: 'x', note: 'hello' }, options: {} },
+        null,
+        reactions({ submitted: true }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { qty: 'x' });
+  });
+
+  it('holds the form open with the required sentence when the submitted reaction clears a required field', async () => {
+    const user = userEvent.setup();
+    const fetchMock = stubFetch(okUpdate({ values: { qty: null } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { qty: { type: 'string', title: 'Qty' } },
+      required: ['qty'],
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { qty: 'x' }, options: {} },
+        null,
+        reactions({ submitted: true }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(screen.getByText('"qty" is required')).toBeInTheDocument());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('textbox')).toHaveValue('');
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it('turns back to the page of a required field the submitted reaction cleared', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ values: { first: null } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        first: { type: 'string', title: 'First' },
+        second: { type: 'string', title: 'Second' },
+      },
+      required: ['first'],
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'One', fields: ['first'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Two', fields: ['second'], display: [], kind: 'input', buttonLabel: null },
+    ];
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { first: 'a', second: 'b' }, options: {} },
+        pages,
+        reactions({ submitted: true }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(screen.getByText(/Step 2 of 2 . Two/)).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Submit' }));
+
+    await waitFor(() => expect(screen.getByText(/Step 1 of 2 . One/)).toBeInTheDocument());
+    expect(screen.getByText('"first" is required')).toBeInTheDocument();
+    expect(onAnswer).not.toHaveBeenCalled();
+  });
+
+  it('answers with a value the submitted reaction set', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ values: { note: 'normalised' } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { note: { type: 'string', title: 'Note' } },
+    };
+    const { onAnswer } = renderCard(
+      formQuestion(
+        schema,
+        { values: { note: 'raw' }, options: {} },
+        null,
+        reactions({ submitted: true }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Answer' }));
+
+    await waitFor(() => expect(onAnswer).toHaveBeenCalledTimes(1));
+    expect(onAnswer).toHaveBeenCalledWith('int-1', { note: 'normalised' });
+  });
+
   it('rounds-trips a page_advanced reaction before turning the step', async () => {
     const user = userEvent.setup();
     const fetchMock = stubFetch(okUpdate({ values: { second: 'filled' } }));
@@ -211,6 +518,37 @@ describe('SchemaFormAnswer reactions', () => {
     // The step turned, and the reaction's value landed on the next step's field.
     await waitFor(() => expect(screen.getByText(/Step 2 of 2 . Two/)).toBeInTheDocument());
     expect(screen.getByRole('textbox')).toHaveValue('filled');
+  });
+
+  it('holds the step on the required sentence when a page_advanced reaction withdraws its pick', async () => {
+    const user = userEvent.setup();
+    stubFetch(okUpdate({ options: { colour: [{ value: 'g', label: 'Green' }] } }));
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        colour: { type: 'string', title: 'Colour' },
+        note: { type: 'string', title: 'Note' },
+      },
+      required: ['colour'],
+    };
+    const pages: readonly FormPage[] = [
+      { title: 'One', fields: ['colour'], display: [], kind: 'input', buttonLabel: null },
+      { title: 'Two', fields: ['note'], display: [], kind: 'input', buttonLabel: null },
+    ];
+    renderCard(
+      formQuestion(
+        schema,
+        { values: { colour: 'r' }, options: { colour: [{ value: 'r', label: 'Red' }] } },
+        pages,
+        reactions({ pageAdvanced: ['One'], submitted: true, choices: ['colour'] }),
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+
+    await waitFor(() => expect(screen.getByText('"colour" is required')).toBeInTheDocument());
+    expect(screen.getByText(/Step 1 of 2 . One/)).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Green' })).toBeInTheDocument();
   });
 
   it('surfaces a failed reaction loudly and does not apply a stale value', async () => {
