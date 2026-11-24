@@ -79,6 +79,17 @@ class TestEnvGuard:
         assert await run_jq_first(".a\n# trailing comment", {"a": 11}) == 11
 
 
+class TestHaltBuiltins:
+    # A program may end itself: ``halt`` ends its stream, ``halt_error`` fails it with its input.
+
+    async def test_halt_error_raises_its_input_through_run_jq_first(self):
+        with pytest.raises(JqEvaluationError, match=r"^x$"):
+            await run_jq_first('"x" | halt_error', {})
+
+    async def test_halt_ends_the_stream_through_run_jq_bounded(self):
+        assert await run_jq_bounded("1, 2, halt, 3", {}, 3) == [1, 2]
+
+
 class TestEnvelopeSealed:
     async def test_the_refusal_reaches_run_jq_first(self):
         with pytest.raises(ValueError, match=r"\$__in is reserved"):

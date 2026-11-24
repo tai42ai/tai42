@@ -507,12 +507,15 @@ _FULL_CLAIMS = {
 }
 _REDUCED_CLAIMS = {**_FULL_CLAIMS, "identity": {"owner_user_id": "alice"}}
 
+# A count past every value any corpus condition emits, so a run takes the whole output stream.
+_EVERY_VALUE = 1_000_000
+
 
 def _jq_outcome(condition: str, context: dict[str, Any]) -> object:
     """What real libjq does with ``condition`` over ``context``: the whole output stream, or
     the error. Errors count — a jq error message quotes the values that produced it."""
     try:
-        return ("values", compile_jq(JqSource(condition, "", ())).input(envelope(context)).all())
+        return ("values", compile_jq(JqSource(condition, "", ())).input(envelope(context, None, _EVERY_VALUE)).all())
     except Exception as exc:
         return ("error", f"{type(exc).__name__}: {exc}")
 

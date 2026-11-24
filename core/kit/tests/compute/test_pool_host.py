@@ -964,7 +964,7 @@ def test_a_pool_started_directly_in_the_process_raises(owner: Callable[[str, str
     done = owner(
         prelude,
         """
-        pool = ComputePool(1)
+        pool = ComputePool(1, max_tasks=10_000)
         try:
             pool.start()
         except ComputePoolUnavailableError as exc:

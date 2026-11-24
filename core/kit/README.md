@@ -213,7 +213,8 @@ its workers, which a process a prelude reshaped does not let them do, so
 `ComputePool.start()` there raises `ComputePoolUnavailableError`. Such a process
 runs its jobs in a pool host instead: a fresh interpreter, started with the
 process's interpreter flags, its environment less `TAI_PROCESS_PRELUDE` and its
-module search path, that runs a pool of its own (sized by `COMPUTE_WORKERS`) and
+module search path, that runs a pool of its own (sized by `COMPUTE_WORKERS`, its
+workers replaced after `COMPUTE_WORKER_MAX_TASKS` jobs) and
 serves the process's jobs over a socket pair, with the same timeout,
 cancellation and errors as a shared parent's pool. The first job pays the host's
 start (about a second, once per host) and every job one socket hop (under a
@@ -261,7 +262,10 @@ child's inherited pool state is reset, and the list above picks again. A
 pool still running when its process exits is stopped by that exit.
 
 `COMPUTE_WORKERS` (default `2`, at least `1`) sizes each pool; a job
-waits for a free worker when every worker is busy. A plugin reaches the pool
+waits for a free worker when every worker is busy. `COMPUTE_WORKER_MAX_TASKS`
+(default `10000`, at least `1`) is how many jobs a worker runs before the pool
+replaces it with a fresh one, between jobs, so nothing a long-lived worker
+accumulates outlives that many jobs; a job in flight is never interrupted. A plugin reaches the pool
 through the app as `tai42_app.compute.run(fn, *args, timeout=...)`.
 
 ## Development

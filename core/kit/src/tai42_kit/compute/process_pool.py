@@ -10,7 +10,8 @@
   nowhere to run a job: the standard library refuses a daemonic process children, and its job
   raises that refusal.
 
-A process's own pool is started (sized by ``COMPUTE_WORKERS``) on its first ``compute_pool()`` call,
+A process's own pool is started (sized by ``COMPUTE_WORKERS``, each worker replaced after
+``COMPUTE_WORKER_MAX_TASKS`` jobs) on its first ``compute_pool()`` call,
 or on the first job of a child it shares the pool with; a pool host, which runs a pool of its own,
 on its first compute job. A child that reaches another process's pool or host starts no workers, so
 it may be short-lived or daemonic. In any forked child the pool state it inherited is reset, and the
@@ -83,7 +84,8 @@ def _own_pool() -> ComputePool:
 
 
 def _started_pool() -> ComputePool:
-    pool = ComputePool(compute_settings().workers)
+    settings = compute_settings()
+    pool = ComputePool(settings.workers, settings.worker_max_tasks)
     pool.start()
     return pool
 

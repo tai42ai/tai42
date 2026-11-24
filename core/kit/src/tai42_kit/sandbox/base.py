@@ -71,6 +71,10 @@ class ManagedSandbox(Sandbox):
     :meth:`_list_orphan_resources`, and ships a :class:`ManagedSandboxSession`
     subclass carrying its runtime I/O.
 
+    The ledger record holds the session object :meth:`create_session` returns, and
+    :meth:`get_session` returns that same object, until :meth:`destroy_session` or
+    :meth:`reap` forgets the record — the object-lifetime promise of :class:`Sandbox`.
+
     The held :class:`SandboxPolicy` is installed by the skeleton at registration
     via :meth:`bind_policy` (the kit cannot read ``CoreSettings``); ``create_session``
     enforces it on EVERY create, before the provider primitive runs, for every

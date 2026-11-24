@@ -40,18 +40,26 @@ _STOPPED_BEFORE_THE_JOB_FINISHED = "the compute pool stopped before the job fini
 class ComputePool:
     """A pool of ``workers`` worker processes running picklable jobs.
 
-    ``start`` launches the workers and ``stop`` ends them; a pool runs once. ``run`` on a pool
+    A worker that ran ``max_tasks`` jobs exits between jobs and a fresh one replaces it, so
+    nothing a long-lived worker accumulates outlives that many jobs; a job in flight is never
+    interrupted by it. ``start`` launches the workers and ``stop`` ends them; a pool runs once. ``run`` on a pool
     that is not running raises :class:`~tai42_kit.compute.errors.ComputePoolUnavailableError`:
     a job never runs anywhere but in a worker. A running pool is stopped when its process exits
     through the interpreter or through ``multiprocessing``'s child exit. The pool's process must
     run OS threads (:meth:`runs_in_this_process`).
     """
 
-    def __init__(self, workers: int) -> None:
-        """Size the pool at ``workers`` processes (at least one); nothing starts until :meth:`start`."""
+    def __init__(self, workers: int, max_tasks: int) -> None:
+        """Size the pool at ``workers`` processes, each replaced after ``max_tasks`` jobs (both at least one).
+
+        Nothing starts until :meth:`start`.
+        """
         if workers < 1:
             raise ValueError(f"a compute pool needs at least one worker, got {workers}")
+        if max_tasks < 1:
+            raise ValueError(f"a compute pool worker needs to run at least one job, got {max_tasks}")
         self._workers = workers
+        self._max_tasks = max_tasks
         self._lock = threading.Lock()
         self._pool: ProcessPool | None = None
         self._stopped = False
@@ -103,6 +111,7 @@ class ComputePool:
                 raise RuntimeError("the compute pool is already running")
             pool = ProcessPool(
                 max_workers=self._workers,
+                max_tasks=self._max_tasks,
                 initializer=_terminate_on_sigterm,
                 context=multiprocessing.get_context("spawn"),
             )

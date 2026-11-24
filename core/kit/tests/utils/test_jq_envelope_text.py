@@ -22,7 +22,7 @@ from tai42_kit.utils.data.jq_worker import JqSource, compile_jq, envelope
 
 def _through_json_dumps(payload: Any, expression: str = ".") -> Any:
     """The result jq gives when the envelope is encoded by ``json.dumps``."""
-    text = json.dumps(envelope(payload, {}))
+    text = json.dumps(envelope(payload, {}, 1))
     return compile_jq(JqSource(expression, "", ())).input_text(text).first()
 
 
@@ -123,7 +123,7 @@ class TestValueParity:
     )
     async def test_a_value_json_dumps_refuses_raises_its_text(self, value):
         with pytest.raises(TypeError) as today:
-            json.dumps(envelope({"x": value}, {}))
+            json.dumps(envelope({"x": value}, {}, 1))
         with pytest.raises(TypeError) as now:
             await run_jq_first(".", {"x": value})
         assert str(now.value) == str(today.value)
@@ -256,3 +256,8 @@ class TestJsonDumpsRunsOnlyOnTheFallbackTexts:
     async def test_a_fallback_text_sends_the_envelope_to_json_dumps_once(self, dumps_calls, payload):
         await run_jq_first(".", payload)
         assert len(dumps_calls) == 1
+
+
+class TestEnvelopeShape:
+    def test_the_envelope_carries_the_count(self):
+        assert envelope({"a": 1}, {"x": 2}, 3) == {"v": {"x": 2}, "d": {"a": 1}, "n": 3}

@@ -33,7 +33,7 @@ def test_a_job_failure_that_does_not_rebuild_is_the_jobs_own_and_not_a_transport
 
 
 async def test_a_job_on_a_stopped_pool_raises_an_unavailable_transport_failure() -> None:
-    pool = ComputePool(1)
+    pool = ComputePool(1, max_tasks=10_000)
     pool.start()
     pool.stop()
 

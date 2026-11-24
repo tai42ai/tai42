@@ -40,7 +40,7 @@ def _gone(pid: int) -> bool:
 
 @pytest.fixture
 def pool() -> Iterator[ComputePool]:
-    pool = ComputePool(1)
+    pool = ComputePool(1, max_tasks=10_000)
     pool.start()
     yield pool
     pool.stop()
@@ -50,7 +50,7 @@ def pool() -> Iterator[ComputePool]:
 def two_worker_pool(monkeypatch: pytest.MonkeyPatch) -> Iterator[ComputePool]:
     """A pool whose workers, like the caller, import the job modules in ``worker_modules`` by name."""
     monkeypatch.syspath_prepend(str(_WORKER_MODULES))  # a spawned worker starts with the caller's path
-    pool = ComputePool(2)
+    pool = ComputePool(2, max_tasks=10_000)
     pool.start()
     yield pool
     pool.stop()
@@ -208,7 +208,7 @@ async def test_an_unpicklable_result_raises_in_the_caller(pool: ComputePool) -> 
 
 async def test_a_pool_that_is_not_started_raises() -> None:
     with pytest.raises(ComputePoolUnavailableError, match="is not started"):
-        await ComputePool(1).run(operator.add, 1, 1)
+        await ComputePool(1, max_tasks=10_000).run(operator.add, 1, 1)
 
 
 async def test_a_stopped_pool_raises(pool: ComputePool) -> None:
@@ -262,7 +262,7 @@ async def test_a_job_aborted_by_a_broken_pool_raises_unavailable(
 
 
 def test_a_pool_not_started_running_or_stopped_is_not_broken(pool: ComputePool) -> None:
-    assert not ComputePool(1).broken
+    assert not ComputePool(1, max_tasks=10_000).broken
     assert not pool.broken
 
     pool.stop()
@@ -286,11 +286,11 @@ def test_a_pool_whose_workers_do_not_start_raises(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(ProcessPool, "active", property(lambda _: False))
 
     with pytest.raises(ComputePoolUnavailableError, match="did not start"):
-        ComputePool(1).start()
+        ComputePool(1, max_tasks=10_000).start()
 
 
 def test_stopping_a_pool_that_never_started_marks_it_stopped() -> None:
-    pool = ComputePool(3)
+    pool = ComputePool(3, max_tasks=10_000)
     pool.stop()
 
     assert pool.workers == 3
@@ -300,4 +300,24 @@ def test_stopping_a_pool_that_never_started_marks_it_stopped() -> None:
 
 def test_fewer_than_one_worker_is_refused() -> None:
     with pytest.raises(ValueError, match="at least one worker"):
-        ComputePool(0)
+        ComputePool(0, max_tasks=10_000)
+
+
+def test_fewer_than_one_max_task_is_refused() -> None:
+    with pytest.raises(ValueError, match="at least one job"):
+        ComputePool(1, max_tasks=0)
+
+
+async def test_a_worker_is_replaced_after_its_max_tasks() -> None:
+    pool = ComputePool(1, max_tasks=3)
+    pool.start()
+    try:
+        pids = [await pool.run(os.getpid) for _ in range(6)]
+
+        assert len(set(pids)) == 2
+        assert pids[:3] == [pids[0]] * 3
+        assert pids[3:] == [pids[3]] * 3
+        assert not pool.broken
+        assert await pool.run(operator.add, 1, 1) == 2
+    finally:
+        pool.stop()

@@ -27,7 +27,7 @@ _NO_RESULT = (
 
 @pytest.fixture
 def pool() -> Iterator[ComputePool]:
-    pool = ComputePool(1)
+    pool = ComputePool(1, max_tasks=10_000)
     pool.start()
     yield pool
     pool.stop()
