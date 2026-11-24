@@ -5212,7 +5212,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-agents"
-version = "17.0.0"
+version = "17.0.1"
 source = { editable = "plugins/agents" }
 dependencies = [
     { name = "anyio" },
@@ -5720,7 +5720,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "tai42-e2e"
-version = "32.0.4"
+version = "32.0.5"
 source = { editable = "e2e" }
 dependencies = [
     { name = "aiosqlite" },
@@ -6288,7 +6288,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "42.0.0"
+version = "43.0.0"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "anyio" },
