@@ -154,6 +154,56 @@ async function openMcpField(page: Page, leaf: string = ENV_ENTRY): Promise<void>
   await expect(page.getByTestId(`mcp-secret-0-${leaf}`)).toBeVisible();
 }
 
+/** Whether `body` is the reload gate's refusal envelope (`{ error, reloading: true }`). */
+function isReloadGateRefusal(status: number, body: string): boolean {
+  if (status !== 503) return false;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // A non-JSON 503 is not the gate's envelope; the caller fails on its status.
+    return false;
+  }
+  return typeof parsed === 'object' && parsed !== null && (parsed as { reloading?: unknown }).reloading === true;
+}
+
+/**
+ * Paste a fresh secret into entry 0's `leaf` (a field showing a committed key reference) and
+ * wait for the combined store-then-mark op (`POST /api/mcp-config/secret-env`) to answer `200`.
+ *
+ * A reload can hold the gate when the click lands — a fanned-out sibling apply, or the
+ * failed-MCP re-probe pass snapshotting or applying its outcome — and the op is then refused
+ * with the gate's retriable `503` (`reloading: true`) before it writes anything. "Use secret"
+ * clears the input and closes the paste form, and a refused op leaves the field on its
+ * committed key, so each attempt reopens the form and types the secret again on the `toPass`
+ * cadence. Any other non-`200` answer leaves the retry at once and fails the test on its
+ * status and body: it is never re-sent.
+ */
+async function pasteUntilStored(page: Page, leaf: string): Promise<void> {
+  const field = page.getByTestId(`mcp-secret-0-${leaf}`);
+  let status = 0;
+  let body = '';
+  await expect(async () => {
+    await field.getByRole('button', { name: 'Change reference' }).click();
+    await field.getByRole('button', { name: 'Paste new secret' }).click();
+    // Target the paste input by its textbox role + exact name (the leaf key): `getByLabel(leaf)`
+    // also matches the row's `role=group` wrapper (`aria-label="<leaf> source"`, a substring hit).
+    await field.getByRole('textbox', { name: leaf, exact: true }).fill(uniq('pasted-secret'));
+    const posted = awaitMutation(
+      page,
+      (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
+    );
+    await field.getByRole('button', { name: 'Use secret' }).click();
+    const response = await posted;
+    status = response.status();
+    body = await response.text();
+    expect(isReloadGateRefusal(status, body), body).toBe(false);
+    // The gate frees only once the in-flight reload completes, which on a MULTIWORKER stack can
+    // exceed 20s (epoch build + swap); give the retry a full reload cycle's room.
+  }).toPass({ timeout: 45_000 });
+  expect(status, body).toBe(200);
+}
+
 /**
  * Paste a fresh secret into entry 0's `leaf` SecretRefField and return the server-generated
  * env key. The combined store-then-mark op (`POST /api/mcp-config/secret-env`) writes a new
@@ -164,34 +214,10 @@ async function openMcpField(page: Page, leaf: string = ENV_ENTRY): Promise<void>
  */
 async function pasteNewSecret(page: Page, request: APIRequestContext, leaf: string): Promise<string> {
   // Drain any residual reload (the seed's, a prior op's) so the combined secret-env op below
-  // lands on a FREE reload gate instead of racing an in-flight reload into a retriable 503 —
-  // nothing mutates config between here and the click, so the gate stays free for our op.
+  // starts on a settled gate; a brief hold that still lands on the click is retried there.
   await waitForReloadSettle(request);
   const before = new Set(Object.keys(await storedEnv(request)));
-  const field = page.getByTestId(`mcp-secret-0-${leaf}`);
-  await field.getByRole('button', { name: 'Change reference' }).click();
-  await field.getByRole('button', { name: 'Paste new secret' }).click();
-  // Target the paste input by its textbox role + exact name (the leaf key): `getByLabel(leaf)`
-  // also matches the row's `role=group` wrapper (`aria-label="<leaf> source"`, a substring hit).
-  await field.getByRole('textbox', { name: leaf, exact: true }).fill(uniq('pasted-secret'));
-  // Fire the combined store-then-mark op, retrying past the reload gate's documented retriable
-  // `503` exactly as `saveMcpConfig`/`postConfig` do. The `waitForReloadSettle` above frees the
-  // gate for THIS op, but a reload can re-acquire it AFTER the settle and before the click — a
-  // fanned-out sibling apply or the failed-MCP re-probe loop, which holds the gate for a probe
-  // while any seeded server (a bare `/bin/true` stub) sits in the failed set. A bare one-shot
-  // assert on that first response leaks the `reloading` body on CI, where the reload window is
-  // wider; re-clicking "Use secret" until a non-`503` lands is the sanctioned handling of the
-  // retriable response (never a sleep). The paste form stays open on a retriable `503`, so the
-  // button is present to re-click; a `200` commits the leaf and ends the retry.
-  await expect(async () => {
-    const posted = awaitMutation(
-      page,
-      (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
-    );
-    await field.getByRole('button', { name: 'Use secret' }).click();
-    const response = await posted;
-    expect(response.status(), await response.text()).toBe(200);
-  }).toPass({ timeout: 45_000 });
+  await pasteUntilStored(page, leaf);
   // The op's 200 is the SERVER's half. The editor shuts its Save door for the whole op —
   // draft, provenance record and all — so the door reopening is the observable that the
   // paste has fully landed in the UI and its generated key is sweep-eligible.
@@ -227,7 +253,8 @@ async function saveMcpConfig(page: Page): Promise<void> {
     const response = await posted;
     expect(response.status(), await response.text()).toBe(200);
     // A MULTIWORKER reload cycle (epoch build + swap) can exceed 20s, and the failed-MCP
-    // re-probe loop can hold the gate for a probe on top; give the retry a full cycle's room.
+    // re-probe loop can hold the gate to bind a recovered server on top; give the retry a full
+    // cycle's room.
   }).toPass({ timeout: 45_000 });
 }
 
@@ -299,25 +326,12 @@ test('pasting a new secret generates a key; the save-time sweep drops it but nev
 
   // PASTE a new secret into the env value: the combined op stores it under a
   // generated key and rewrites the leaf to reference that key.
-  // Drain any residual reload first so the combined op below lands on a FREE reload gate
-  // instead of racing an in-flight reload into a retriable 503.
+  // Drain any residual reload first so the combined op below starts on a settled gate.
   await waitForReloadSettle(request);
-  const field = page.getByTestId(`mcp-secret-0-${ENV_ENTRY}`);
-  await field.getByRole('button', { name: 'Change reference' }).click();
-  await field.getByRole('button', { name: 'Paste new secret' }).click();
-  // Target the paste input by its textbox role + exact name: `getByLabel(ENV_ENTRY)` also
-  // matches the row's `role=group` wrapper (`aria-label="REFVAL source"`, a substring hit).
-  await field.getByRole('textbox', { name: ENV_ENTRY, exact: true }).fill(uniq('pasted-secret'));
-  // "Use secret" fires the combined store-then-mark op (`POST /api/mcp-config/secret-env`),
-  // which writes the generated env key then fans a reload out. Await that op's own 200 so the
-  // key-count assertion below reads the store AFTER the write landed, not mid-op.
-  const secretEnvOk = awaitMutation(
-    page,
-    (r) => r.url().endsWith('/api/mcp-config/secret-env') && r.request().method() === 'POST',
-  );
-  await field.getByRole('button', { name: 'Use secret' }).click();
-  const secretEnvRes = await secretEnvOk;
-  expect(secretEnvRes.status(), await secretEnvRes.text()).toBe(200);
+  // "Use secret" fires the combined store-then-mark op, which writes the generated env key then
+  // fans a reload out. Await that op's own 200 so the key-count assertion below reads the store
+  // AFTER the write landed, not mid-op.
+  await pasteUntilStored(page, ENV_ENTRY);
   // The editor shuts its Save door for the whole op; the door reopening is the observable
   // that the paste landed in the UI too, not just on the server.
   await expect(page.getByRole('button', { name: 'Save config' })).toBeEnabled({ timeout: 60_000 });
