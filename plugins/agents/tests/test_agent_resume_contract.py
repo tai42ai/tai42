@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -241,10 +242,8 @@ def test_an_unconfigured_index_owns_nothing(monkeypatch: pytest.MonkeyPatch) -> 
         raise AssertionError("the kill handler read the park index though it is unconfigured")
         yield  # pragma: no cover — keeps this a generator; the raise fires on first entry
 
-    settings = park_binding.agents_park_redis_settings()
-    monkeypatch.setattr(
-        park_binding, "_bound", (settings, ParkIndex(park_binding.AGENTS_PARK_NAMESPACE, settings, client=_forbidden))
-    )
+    monkeypatch.setattr(park_binding, "ParkIndex", functools.partial(ParkIndex, client=_forbidden))
+    monkeypatch.setattr(park_binding, "_index", None)
     assert asyncio.run(agent_park_kill_handler("not-ours", "cancelled")) is False
 
 
