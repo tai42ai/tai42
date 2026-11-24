@@ -19,14 +19,14 @@ from tai42_contract.interactions import LocationElement, MediaItem
 
 from tai42_skeleton.conversations import cache, working_signal
 from tai42_skeleton.conversations.mode import effective_mode, supports_thread_append
-from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
+from tai42_skeleton.conversations.models import ConversationRecord
 from tai42_skeleton.conversations.pairing import Passthrough, classify
 from tai42_skeleton.conversations.persons import PersonErasingError
 from tai42_skeleton.conversations.thread_ids import person_id_of
 from tai42_skeleton.conversations.turn import accessors, agent_turn, pairing, tool_turn
 from tai42_skeleton.conversations.turn.context import _conversation_attribution, _conversation_state_context
 from tai42_skeleton.conversations.turn.outcome import _SilentOutcome, _tool_error, _ToolOutcome
-from tai42_skeleton.conversations.turn.record import _outcome_record
+from tai42_skeleton.conversations.turn.record import _log_unvoiced_failure, _outcome_record
 from tai42_skeleton.conversations.turn.reply_window import read_turn_reply_window
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 from tai42_skeleton.states.context import state_context
@@ -99,7 +99,7 @@ async def _target_outcome(
                 route.route_name,
                 type(exc).__name__,
             )
-            return _tool_error(f"reply window read failed ({type(exc).__name__})", route)
+            return _tool_error(f"reply window read failed ({type(exc).__name__})")
         attribution = _conversation_attribution(route, intake, person)
         context = _conversation_state_context(route, intake, person, actor=attribution.user_id)
         working_signal.start_turn(intake)
@@ -171,7 +171,7 @@ async def _manual_target_outcome(route: ConversationRoute, intake: ConversationR
                 logger.exception(
                     "conversations: manual-mode inbound append for route %r failed", route.route_name, exc_info=exc
                 )
-                return _tool_error(f"manual-mode append error: {exc}", route)
+                return _tool_error(f"manual-mode append error: {exc}")
     return _SilentOutcome()
 
 
@@ -239,7 +239,11 @@ async def _resolve_turn_record(
     if intake.inbound_kind == "event":
         person = await _resolve_event_person(route, intake, multichannel)
         return (
-            _outcome_record(intake, await _target_outcome(route, intake, text, batch, person, params, form, form_tag)),
+            _outcome_record(
+                intake,
+                await _target_outcome(route, intake, text, batch, person, params, form, form_tag),
+                route,
+            ),
             None,
         )
 
@@ -258,6 +262,7 @@ async def _resolve_turn_record(
                     attachments=attachments,
                     location=location,
                 ),
+                route,
             ),
             None,
         )
@@ -270,7 +275,7 @@ async def _resolve_turn_record(
         # The sender's person is being erased: the turn takes the error outcome with the refusal
         # as its detail. Sent again after the erase, the address starts a fresh person.
         logger.warning("conversations: turn on route %r refused: %s", route.route_name, exc)
-        return _outcome_record(intake, _tool_error(str(exc), route)), None
+        return _outcome_record(intake, _tool_error(str(exc)), route), None
     greeting_code = await pairing._mint_and_owe_greeting(multichannel, intake.thread_id) if created else None
     action = classify(text)
     if isinstance(action, Passthrough):
@@ -283,7 +288,7 @@ async def _resolve_turn_record(
         # leaving the greeting carrying a now-dead code (a Redeem/Unlink ignore it).
         outcome = await pairing._run_pairing_turn(multichannel, person, action, greeting_code, route)
     outcome, owed_greeting_thread_id = await pairing._deliver_with_owed_greeting(intake.thread_id, outcome)
-    return _outcome_record(intake, outcome), owed_greeting_thread_id
+    return _outcome_record(intake, outcome, route), owed_greeting_thread_id
 
 
 async def _complete_turn(
@@ -327,13 +332,13 @@ async def _persist_completed(
 ) -> ConversationRecord:
     """Move a completed turn's record to its outcome, guarded on it still being at intake.
 
-    A produced answer goes to ``pending_delivery``; a silent tool turn goes straight to terminal
-    ``silent`` with nothing to deliver; a turn the target yielded (:class:`_SupersededOutcome`)
-    goes to its door's ``superseded`` outcome (a channel-door yielded turn moves straight to its
-    terminal ``superseded`` state; the API-door split sits at ``pending_delivery`` and takes the
-    ``complete_turn`` branch). The transition is guarded on the record still being at intake, so a
-    turn finishing after a re-drive resolved its record raises rather than overwriting the outcome
-    the client was given.
+    A produced line goes to ``pending_delivery``; a channel-door turn that sends nothing (a
+    silent tool turn, a failure owed no line) goes straight to terminal ``silent``; a turn the
+    target yielded (:class:`_SupersededOutcome`) goes to its door's ``superseded`` outcome (a
+    channel-door yielded turn moves straight to its terminal ``superseded`` state; the API-door
+    split sits at ``pending_delivery`` and takes the ``complete_turn`` branch). The transition
+    is guarded on the record still being at intake, so a turn finishing after a re-drive
+    resolved its record raises rather than overwriting the outcome the client was given.
 
     ``owed_greeting_thread_id`` (set by :func:`_resolve_turn_record` when this record delivers a
     first-contact greeting) names the thread whose owed greeting is BURNED — but only after the
@@ -343,21 +348,14 @@ async def _persist_completed(
     never dropping it).
     """
     store = cache.get_conversations_manager().records
-    if completed.delivery_status is DeliveryStatus.SILENT:
-        outcome = await store.complete_silent(completed)
-        verb = "complete_silent"
-    elif completed.delivery_status is DeliveryStatus.SUPERSEDED:
-        outcome = await store.supersede_record(completed)
-        verb = "supersede_record"
-    else:
-        outcome = await store.complete_turn(completed)
-        verb = "complete_turn"
+    outcome = await store.complete_record(completed)
     if outcome != 1:
         raise RuntimeError(
             f"conversations: record {message_id} is no longer at intake "
-            f"({verb} answered {outcome}); its outcome was resolved elsewhere and this turn's "
-            "outcome is discarded"
+            f"(complete_record answered {outcome} for a {completed.delivery_status.value!r} outcome); its outcome "
+            "was resolved elsewhere and this turn's outcome is discarded"
         )
+    _log_unvoiced_failure(completed)
     if owed_greeting_thread_id is not None:
         await store.burn_owed_greeting(owed_greeting_thread_id)
     return completed

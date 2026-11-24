@@ -27,8 +27,8 @@ from tai42_skeleton.conversations.turn.inbound_checks import (
     _checked_params,
 )
 from tai42_skeleton.conversations.turn.keys import _channel_bucket_key
-from tai42_skeleton.conversations.turn.outcome import _text_part, reply_text
-from tai42_skeleton.conversations.turn.record import _new_record, _with_outcome
+from tai42_skeleton.conversations.turn.outcome import _ResolvedOutcome, _text_part, reply_text
+from tai42_skeleton.conversations.turn.record import _new_record, _outcome_record
 from tai42_skeleton.conversations.turn.redrive import _resolve_stranded_intake
 from tai42_skeleton.conversations.turn.routing import (
     _Multichannel,
@@ -360,7 +360,9 @@ async def _shed_with_reply(
         raise
     if owner != message_id:
         return owner
-    completed = _with_outcome(intake, "answered", [_text_part(reply_text(route, "slow_down", _SLOW_DOWN_TEXT))], None)
+    completed = _outcome_record(
+        intake, _ResolvedOutcome(parts=[_text_part(reply_text(route, "slow_down", _SLOW_DOWN_TEXT))]), route
+    )
     outcome = await store.complete_turn(completed)
     if outcome != 1:
         raise RuntimeError(

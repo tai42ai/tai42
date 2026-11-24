@@ -150,13 +150,13 @@ async def _agent_result_outcome(
     if route.reply_expr is None:
         text = _serialize_structured(structured) if isinstance(final, StructuredFinal) else final.text
         if not text.strip():
-            return _tool_error("agent produced an empty answer", route)
-        return _ResolvedOutcome(answer_status="answered", parts=[_text_part(text)], error=None)
+            return _tool_error("agent produced an empty answer")
+        return _ResolvedOutcome(parts=[_text_part(text)])
     reply = await _tool_reply(route, structured, turn=turn, asks=[], parked=parked)
     parts = _reply_parts(reply)
     if parts is None:
         return _SilentOutcome()
-    return _ResolvedOutcome(answer_status="answered", parts=parts, error=None)
+    return _ResolvedOutcome(parts=parts)
 
 
 async def _agent_asks_outcome(
@@ -167,7 +167,7 @@ async def _agent_asks_outcome(
     parts = _reply_parts(reply)
     if parts is None:
         return _SilentOutcome()
-    return _ResolvedOutcome(answer_status="answered", parts=parts, error=None)
+    return _ResolvedOutcome(parts=parts)
 
 
 async def _agent_outcome_of_visit(
@@ -187,7 +187,7 @@ async def _agent_outcome_of_visit(
         return await _agent_asks_outcome(route, asks, turn=turn, parked=parked)
     if outcome.kind == "parked":
         return _SilentOutcome()
-    return _tool_error("agent produced an empty answer", route)
+    return _tool_error("agent produced an empty answer")
 
 
 async def _run_agent_turn(
@@ -220,8 +220,9 @@ async def _run_agent_turn(
     The turn-scoped bridge context is established around the agent invocation so an in-process builtin
     the agent calls (``set_conversation_mode``) reads the current conversation's thread from it. The
     completion continuation (:data:`COMPLETION_TOOL_NAME`) is bound for the run's duration, carrying
-    this turn's ``thread_id`` and its intake ``message_id`` (the late-path deliverer rebuilds
-    ``$turn`` from that stored record): it is the deferred-response delivery path that lets an async
+    this turn's ``thread_id``, its intake ``message_id`` (the late-path deliverer rebuilds
+    ``$turn`` from that stored record) and its ``inbound_kind`` (who sent the turn, which decides
+    whether a failure owes the participant a line): it is the deferred-response delivery path that lets an async
     ask park here (a run with none bound refuses the ask loudly pre-persist), and a resumed run's
     final answer fires it to post the reply back into this thread. The outermost minting call frame is
     a PUSH of the target agent's name (the agent drive is not a tool dispatch, so nothing else pushes
@@ -230,7 +231,7 @@ async def _run_agent_turn(
     """
     agent = accessors._agent_registry().get(route.target_name)
     if agent is None:
-        return _tool_error(f"agent {route.target_name!r} is not registered", route)
+        return _tool_error(f"agent {route.target_name!r} is not registered")
     payload = _tool_payload(
         route,
         text,
@@ -255,14 +256,14 @@ async def _run_agent_turn(
             route.route_name,
             type(exc).__name__,
         )
-        return _tool_error(f"door contract error ({type(exc).__name__})", route)
+        return _tool_error(f"door contract error ({type(exc).__name__})")
     try:
         run_kwargs, start_requested = _agent_run_kwargs(agent, text, contract.start)
     except ValueError as exc:
         logger.warning(
             "conversations: start_expr for agent route %r produced invalid run kwargs: %s", route.route_name, exc
         )
-        return _tool_error(f"start_expr error: {exc}", route)
+        return _tool_error(f"start_expr error: {exc}")
     # A start runs only when the visit does not resume/take first (the pending-caller-ask guard
     # below refuses the actual start). The visit cancels before it starts, so a caller ask this
     # turn's ``cancel_expr`` names leaves nobody owed an answer and does not hold the start back.
@@ -273,7 +274,7 @@ async def _run_agent_turn(
             "conversations: agent route %r cannot start a turn while a caller ask is pending", route.route_name
         )
         return _tool_error(
-            "a caller question is still pending on this thread; the run cannot start until it is answered", route
+            "a caller question is still pending on this thread; the run cannot start until it is answered"
         )
     # The caller-ask landing this door declares (it can land IFF the route carries both reply and
     # resume paths). Declared around the drive so the ask park seam fails any caller ask the agent
@@ -312,7 +313,9 @@ async def _run_agent_turn(
             ) as identity:
                 await authorize_execution_agent_run(identity, route.target_name)
                 completion_token = set_park_completion(
-                    COMPLETION_TOOL_NAME, {"message_id": record.message_id}, thread_id=thread_id
+                    COMPLETION_TOOL_NAME,
+                    {"message_id": record.message_id, "inbound_kind": record.inbound_kind},
+                    thread_id=thread_id,
                 )
                 try:
                     # The outermost minting call frame as a PUSH of the agent's name, under the
@@ -339,15 +342,16 @@ async def _run_agent_turn(
         # A run's failed terminal RAISES this typed run failure — the agent's own, or a caller ask
         # with no landing (the fail-fast above, or the seam inside the run), never a tool-level error
         # the model could route around. Surface it through the door's failure path: record the
-        # opaque payload WHOLE and deliver the target's reply when the failure carries one, else the
-        # route's generic client-safe error. Caught BEFORE the generic arm so the payload is preserved.
-        failed = _terminal_failure(exc, route)
+        # opaque payload WHOLE and carry the target's reply when the failure has one; the line the
+        # participant reads is resolved at the record seam (``failure_line``). Caught BEFORE the
+        # generic arm so the payload is preserved.
+        failed = _terminal_failure(exc)
         logger.exception("conversations: agent turn for route %r failed: %s", route.route_name, failed.error)
         return failed
     except PermissionDeniedError as exc:
-        return _tool_error(f"turn denied: {exc}", route)
+        return _tool_error(f"turn denied: {exc}")
     except Exception as exc:
         # A failed turn becomes a logged error OUTCOME, not a swallowed error.
         logger.exception("conversations: turn for route %r failed", route.route_name, exc_info=exc)
-        return _tool_error(f"turn error: {exc}", route)
+        return _tool_error(f"turn error: {exc}")
     return await _agent_outcome_of_visit(route, outcome, turn=cast("dict[str, object]", payload["turn"]), parked=parked)

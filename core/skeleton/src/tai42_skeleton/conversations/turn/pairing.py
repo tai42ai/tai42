@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import string
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from tai42_contract.conversations import (
@@ -22,6 +23,7 @@ from tai42_skeleton.conversations.pairing import Link, Redeem, Unlink
 from tai42_skeleton.conversations.persons import PairingTarget, PersonErasingError
 from tai42_skeleton.conversations.thread_ids import person_thread_id
 from tai42_skeleton.conversations.turn.outcome import (
+    _FailedOutcome,
     _pairing_reply,
     _ResolvedOutcome,
     _SilentOutcome,
@@ -84,16 +86,14 @@ def _with_greeting(outcome: _SilentOutcome | _ResolvedOutcome, greeting: str) ->
     r"""Prepend ``greeting`` to a DELIVERING outcome as its own LEADING message.
 
     A greeting is a message of its own, so it becomes the first ordered part ahead of the turn's
-    parts; a silent outcome becomes an answered greeting-only reply, an error outcome keeps the
-    greeting ahead of its client-safe text. The joined answer for a single-part outcome renders as
-    ``f"{greeting}\n\n{answer}"``. A superseded outcome delivers nothing and never reaches here —
-    :func:`_deliver_with_owed_greeting` leaves its greeting owed for the successor.
+    parts; a silent outcome becomes an answered greeting-only reply. The joined answer for a
+    single-part outcome renders as ``f"{greeting}\n\n{answer}"``. A failed outcome carries the
+    greeting as a leading part instead (:func:`_deliver_with_owed_greeting`), and a superseded
+    outcome delivers nothing and never reaches here — its greeting stays owed for the successor.
     """
     if isinstance(outcome, _SilentOutcome):
-        return _ResolvedOutcome(answer_status="answered", parts=[_text_part(greeting)], error=None)
-    return _ResolvedOutcome(
-        answer_status=outcome.answer_status, parts=[_text_part(greeting), *outcome.parts], error=outcome.error
-    )
+        return _ResolvedOutcome(parts=[_text_part(greeting)])
+    return _ResolvedOutcome(parts=[_text_part(greeting), *outcome.parts])
 
 
 async def _mint_and_owe_greeting(multichannel: _Multichannel, thread_id: str) -> _MintedCode | None:
@@ -121,16 +121,20 @@ async def _deliver_with_owed_greeting(thread_id: str, outcome: _ToolOutcome) -> 
 
     A greeting, once due, is never dropped. A superseded outcome delivers nothing, so the owed
     greeting stays parked and the first successor turn that delivers prepends it. Any other outcome
-    delivers a reply (a silent outcome due a greeting becomes an answered greeting-only reply), so it
-    READs the owed greeting (no delete) and prepends it, naming the thread for the caller to burn
-    AFTER the persist — a turn whose persist loses its intake guard never burns, leaving the greeting
-    owed for the successor. A turn with none owed reads ``None`` and is left unchanged.
+    delivers a reply (a silent outcome due a greeting becomes an answered greeting-only reply; a
+    failed one carries the greeting as a leading part ahead of its failure line), so it READs the
+    owed greeting (no delete) and prepends it, naming the thread for the caller to burn AFTER the
+    persist — a turn whose persist loses its intake guard never burns, leaving the greeting owed for
+    the successor. A turn with none owed reads ``None`` and is left unchanged. Only a message turn
+    reaches here, and a failed message turn always delivers a line (:func:`failure_line`).
     """
     if isinstance(outcome, _SupersededOutcome):
         return outcome, None
     greeting = await cache.get_conversations_manager().records.read_owed_greeting(thread_id)
     if greeting is None:
         return outcome, None
+    if isinstance(outcome, _FailedOutcome):
+        return replace(outcome, leading_parts=(_text_part(greeting),)), thread_id
     return _with_greeting(outcome, greeting), thread_id
 
 
@@ -188,7 +192,7 @@ async def _run_pairing_turn(
         return _pairing_reply(reply_text(route, "pairing_code_invalid", _INVALID_CODE_TEXT))
     except Exception as exc:
         logger.exception("conversations: pairing turn on route %r failed", multichannel.route_name, exc_info=exc)
-        return _tool_error(f"pairing turn error: {exc}", route)
+        return _tool_error(f"pairing turn error: {exc}")
 
 
 async def _redeem_turn(

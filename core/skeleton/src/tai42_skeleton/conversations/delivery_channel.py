@@ -41,8 +41,8 @@ async def _notify_refusal(store: ConversationRecordStore, record: ConversationRe
 
     A terminal, non-transport refusal on a reachable channel (an oversized answer, an unrenderable
     part, or a permanent input refusal) has already failed the record; the participant is then sent
-    the SAME uniform client-safe notice the failed park-completion path delivers, through the same
-    channel, resolved via the route's ``reply_texts.error`` when it carries one (a route-lookup
+    the SAME uniform client-safe text a failed turn the participant sent is answered with, through the
+    same channel, resolved via the route's ``reply_texts.error`` when it carries one (a route-lookup
     fault falls back to the built-in text). The notice is a ``notice`` send record of its own,
     bounded by ``delivery_send_timeout_seconds`` and never retried; it never changes the state of
     the failed reply's record. The send is best-effort and loud: a store fault on the notice's own
@@ -50,13 +50,15 @@ async def _notify_refusal(store: ConversationRecordStore, record: ConversationRe
     ERROR here, because the reply's record is already terminally ``failed`` and there is no second
     delivery machine for the notice.
 
-    A reply to a participant's turn earns the notice — a client turn and a park-completion resumed
-    reply alike (both are answers the participant awaits). Only an operator's hand-injected send
-    (``operator_send``) is skipped: it answers nothing the participant asked and the uniform text
-    speaks of "your message", so its refusal fails loudly with the admin failed-delivery listing as
-    the signal, exactly as a transport exhaustion's is.
+    A reply to a turn the participant sent earns the notice — a client turn and a park-completion
+    resumed reply alike (both are answers the participant awaits). A reply to a turn the participant
+    did not send is skipped: an operator's hand-injected send (``operator_send``), and the reply to
+    an event turn (``inbound_kind`` ``event``) on a client record or on the completion record that
+    answers it. Neither answers anything the participant asked and the uniform text speaks of "your
+    message", so its refusal fails loudly with the record's ``failed`` state, its ERROR log and the
+    admin failed-delivery listing as the signal, exactly as a transport exhaustion's is.
     """
-    if record.operator_send:
+    if record.operator_send or record.inbound_kind == "event":
         return
 
     from tai42_skeleton.conversations import cache

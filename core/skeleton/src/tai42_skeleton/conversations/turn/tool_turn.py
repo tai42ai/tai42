@@ -8,7 +8,7 @@ reply (or to a silent/error outcome).
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from tai42_contract.app import tai42_app
 from tai42_contract.channels import ReplyWindow
@@ -177,6 +177,7 @@ async def _drive_visit(
     thread_id: str,
     *,
     message_id: str,
+    inbound_kind: Literal["message", "event"],
     contract: DoorContractOutcome,
     kwargs: dict[str, object],
     start_requested: bool,
@@ -198,14 +199,15 @@ async def _drive_visit(
 
         # Bind the generic tool-route completion for the turn: a parking tool captures it, and its
         # resumer fires the deferred outcome back to THIS thread out of band. A non-parking tool
-        # never reads it. Pin the ORIGINATING route and this turn's ``message_id`` (the late-path
-        # deliverer rebuilds ``$turn`` from that stored record) beside the thread — a linked person
-        # may write from a different route before the resume, and the completion must map the
-        # outcome through THIS route's reply_expr, not the route the thread's newest record names.
-        # Reset in a finally so it never leaks past the turn.
+        # never reads it. Pin the ORIGINATING route, this turn's ``message_id`` (the late-path
+        # deliverer rebuilds ``$turn`` from that stored record) and who sent the turn
+        # (``inbound_kind``, which decides whether a failure owes the participant a line) beside the
+        # thread — a linked person may write from a different route before the resume, and the
+        # completion must map the outcome through THIS route's reply_expr, not the route the
+        # thread's newest record names. Reset in a finally so it never leaks past the turn.
         completion_token = set_park_completion(
             DELIVER_TOOL_COMPLETION_NAME,
-            {"route_name": route.route_name, "message_id": message_id},
+            {"route_name": route.route_name, "message_id": message_id, "inbound_kind": inbound_kind},
             thread_id=thread_id,
         )
 
@@ -266,11 +268,11 @@ async def _tool_outcome_of_result(
             )
         except Exception:
             logger.exception("conversations: result-shape diagnostic failed")
-        return _tool_error(f"reply_expr error: {exc}", route)
+        return _tool_error(f"reply_expr error: {exc}")
     parts = _reply_parts(reply)
     if parts is None:
         return _SilentOutcome()
-    return _ResolvedOutcome(answer_status="answered", parts=parts, error=None)
+    return _ResolvedOutcome(parts=parts)
 
 
 async def _run_tool_turn(
@@ -321,7 +323,8 @@ async def _run_tool_turn(
 
     A failed run RAISES :class:`~tai42_contract.interactions.RunTerminalFailed`, caught here as
     that SAME ``error`` outcome: the failure's OPAQUE payload is recorded WHOLE as the detail (no
-    key read out of it) and the route's generic client-safe error is the delivered reply. A RETURNED
+    key read out of it) and the participant reads what :func:`failure_line` resolves: the failure's
+    own ``reply``, else the route's client-safe error on a message turn, else nothing. A RETURNED
     value is a success the route's ``reply_expr`` maps with no status inspection.
 
     The generic completion continuation (:data:`DELIVER_TOOL_COMPLETION_NAME`) is bound for
@@ -364,7 +367,7 @@ async def _run_tool_turn(
             route.route_name,
             type(exc).__name__,
         )
-        return _tool_error(f"door contract error ({type(exc).__name__})", route)
+        return _tool_error(f"door contract error ({type(exc).__name__})")
     kwargs, start_requested = _start_kwargs(payload, contract.start)
     # The route's optional door binding, read from the target config; handed to ``visit``, which
     # deposits it around ``start`` alone. A route with no binding deposits nothing.
@@ -375,6 +378,7 @@ async def _run_tool_turn(
             route,
             thread_id,
             message_id=record.message_id,
+            inbound_kind=record.inbound_kind,
             contract=contract,
             kwargs=kwargs,
             start_requested=start_requested,
@@ -388,18 +392,18 @@ async def _run_tool_turn(
     except RunTerminalFailed as exc:
         # The run reached a failed terminal: the failure is RAISED (never a returned status-keyed
         # value), carrying the driver's outcome as an OPAQUE payload. Record the payload WHOLE as
-        # the turn's failure detail — no key is read out of it — and deliver the target's reply when
-        # the failure carries one, else the route's generic client-safe error reply. Caught BEFORE
-        # the generic arm so the payload is preserved as the detail rather than collapsed to
-        # ``str(exc)``.
-        failed = _terminal_failure(exc, route)
+        # the turn's failure detail — no key is read out of it — and carry the target's reply when
+        # the failure has one; the line the participant reads is resolved at the record seam
+        # (``failure_line``). Caught BEFORE the generic arm so the payload is preserved as the detail
+        # rather than collapsed to ``str(exc)``.
+        failed = _terminal_failure(exc)
         logger.exception("conversations: tool turn for route %r failed: %s", route.route_name, failed.error)
         return failed
     except PermissionDeniedError as exc:
-        return _tool_error(f"turn denied: {exc}", route)
+        return _tool_error(f"turn denied: {exc}")
     except Exception as exc:
         logger.exception("conversations: tool turn for route %r failed", route.route_name, exc_info=exc)
-        return _tool_error(f"turn error: {exc}", route)
+        return _tool_error(f"turn error: {exc}")
     return await _outcome_of_visit(route, outcome, turn=cast("dict[str, object]", payload["turn"]), parked=parked)
 
 
@@ -458,11 +462,11 @@ async def _outcome_of_visit(
             logger.exception(
                 "conversations: mapping the caller asks for route %r failed", route.route_name, exc_info=exc
             )
-            return _tool_error(f"reply_expr error: {exc}", route)
+            return _tool_error(f"reply_expr error: {exc}")
         parts = _reply_parts(reply)
         if parts is None:
             return _SilentOutcome()
-        return _ResolvedOutcome(answer_status="answered", parts=parts, error=None)
+        return _ResolvedOutcome(parts=parts)
     return _SilentOutcome()
 
 

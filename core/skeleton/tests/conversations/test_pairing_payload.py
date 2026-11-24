@@ -546,11 +546,17 @@ class _StreamAgent(MemorylessTestAgent):
             yield event
 
 
-def _resolved(outcome):
-    """Assert a resolved (answered/error) outcome and return ``(answer_status, answer,
-    error)`` — the shape the drain tests read."""
+def _answered(outcome) -> str:
+    """Assert an answered outcome and return its joined answer text."""
     assert isinstance(outcome, outcome_module._ResolvedOutcome), outcome
-    return outcome.answer_status, outcome.answer, outcome.error
+    return outcome.answer
+
+
+def _failed(outcome) -> str:
+    """Assert a failed outcome the target gave no reply for and return its internal detail."""
+    assert isinstance(outcome, outcome_module._FailedOutcome), outcome
+    assert outcome.reply is None
+    return outcome.error
 
 
 def _agent_turn_args(route, thread_id="bridge:x:y"):
@@ -584,24 +590,19 @@ async def test_agent_drain_serializes_structured_finals(env, monkeypatch):
     }
     for expected, event in cases.items():
         monkeypatch.setattr(accessors_module, "_agent_registry", lambda event=event: {"assistant": _StreamAgent(event)})
-        status, answer, error = _resolved(
+        answer = _answered(
             await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
         )
-        assert status == "answered"
         assert answer == expected
-        assert error is None
 
 
 async def test_agent_drain_raises_on_an_interrupt_becoming_an_error_outcome(env, monkeypatch):
     route = _api_route()
     agent = _StreamAgent(InterruptFinal(interrupt_id="i1", payload={"q": "?"}, reason="needs input"))
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": agent})
-    status, answer, error = _resolved(
+    error = _failed(
         await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
     )
-    assert status == "error"
-    assert answer == outcome_module._ERROR_ANSWER_TEXT
-    assert error is not None
     assert "interrupt" in error
 
 
@@ -619,19 +620,16 @@ async def test_agent_drain_async_park_is_a_silent_outcome(env, monkeypatch):
 async def test_agent_drain_empty_stream_is_an_empty_answer_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(accessors_module, "_agent_registry", lambda: {"assistant": _StreamAgent()})  # no events
-    status, _answer, error = _resolved(
+    error = _failed(
         await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
     )
-    assert status == "error"
     assert error == "agent produced an empty answer"
 
 
 async def test_agent_turn_for_an_unregistered_agent_is_an_error(env, monkeypatch):
     route = _api_route()
     monkeypatch.setattr(accessors_module, "_agent_registry", dict)
-    status, _answer, error = _resolved(
+    error = _failed(
         await agent_turn_module._run_agent_turn(route, "hi", "bridge:x:y", "+client", **_agent_turn_args(route))
     )
-    assert status == "error"
-    assert error is not None
     assert "not registered" in error

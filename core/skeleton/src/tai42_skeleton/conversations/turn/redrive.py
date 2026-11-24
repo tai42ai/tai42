@@ -2,7 +2,7 @@
 
 An interrupted commit or a worker that died leaves a record at intake; the in-process
 watcher and the periodic re-drive both arbitrate such a record against its inbound claim
-and give it the client-safe error outcome its turn never produced.
+and give it the error outcome its turn never produced.
 """
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
-from tai42_skeleton.conversations.turn.outcome import _error_answer_text, _text_part
-from tai42_skeleton.conversations.turn.record import _with_outcome
+from tai42_skeleton.conversations.turn.outcome import _FailedOutcome
+from tai42_skeleton.conversations.turn.record import _log_unvoiced_failure, _outcome_record
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
@@ -128,38 +128,41 @@ async def _owns_inbound_claim(store: ConversationRecordStore, record: Conversati
 
 
 async def _fail_stranded_turn(store: ConversationRecordStore, record: ConversationRecord) -> None:
-    """Give an intake record the error outcome its interrupted turn never produced and spawn its delivery.
+    """Give an intake record the error outcome its interrupted turn never produced, and deliver its line.
 
-    The one resolution both the in-process watcher and the periodic re-drive apply. Losing the guarded
-    transition leaves the existing outcome standing.
+    The one resolution both the in-process watcher and the periodic re-drive apply; the turn is
+    never re-run. Losing the guarded transition leaves the existing outcome standing.
 
-    The intake record carries its ``route_name``, so the participant-facing text resolves the
-    route's ``reply_texts.error`` best-effort: the route is looked up through the conversations
-    manager and ANY failure (manager unavailable, route gone, exception) falls back to the
-    built-in default. This is an interrupted-turn/lease-lapse repair path, so it must never be
-    less robust than a bare default — the lookup only ever upgrades the text, never blocks the
-    outcome. Only the participant-facing ``answer`` resolves through the route; the record's ``error``
-    detail and the logs keep the built-in wording.
+    The outcome goes through the same seam a live failed turn takes (:func:`_outcome_record`), so
+    a turn the participant sent delivers the route's ``reply_texts.error`` (else the built-in line)
+    and an event turn delivers nothing, its failure kept on the record and in the ERROR log. The
+    route is looked up best-effort: ANY failure (manager unavailable, route gone, exception)
+    resolves the line without it, so this repair path is never less robust than the built-in
+    default — the lookup only ever upgrades the text, never blocks the outcome.
     """
     try:
         route = await cache.get_conversations_manager().get_route(record.route_name)
     except Exception:
         route = None
-    completed = _with_outcome(
-        record, "error", [_text_part(_error_answer_text(route))], "turn was interrupted before it produced an answer"
+    completed = _outcome_record(
+        record, _FailedOutcome(error="turn was interrupted before it produced an answer", reply=None), route
     )
-    outcome = await store.complete_turn(completed)
+    outcome = await store.complete_record(completed)
     if outcome != 1:
         logger.warning(
-            "conversations: intake record %s left intake while it was being re-driven (complete_turn answered %d); "
+            "conversations: intake record %s left intake while it was being re-driven (complete_record answered %d); "
             "its outcome stands as written",
             record.message_id,
             outcome,
         )
         return
+    _log_unvoiced_failure(completed)
     logger.error(
-        "conversations: record %s was stranded mid-turn; the turn is NOT re-run and a client-safe error outcome "
-        "is delivered instead",
+        "conversations: %s record %s on route %r was stranded mid-turn; the turn is NOT re-run and it takes "
+        "an error outcome instead",
+        record.inbound_kind,
         record.message_id,
+        record.route_name,
     )
-    spawn_delivery(record.message_id)
+    if completed.delivery_status is not DeliveryStatus.SILENT:
+        spawn_delivery(record.message_id)

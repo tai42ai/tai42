@@ -1092,6 +1092,23 @@ async def test_greeting_due_first_contact_with_an_error_outcome_keeps_the_greeti
     assert record is not None
     assert record.answer_status == "error"
     assert record.answer == f"Welcome!\n\n{outcome_module._ERROR_ANSWER_TEXT}"
+    assert [p.message for p in record.answer_parts or []] == ["Welcome!", outcome_module._ERROR_ANSWER_TEXT]
+    assert record.error is not None
+    assert "agent blew up" in record.error
+    assert await _store().read_owed_greeting(record.thread_id) is None
+
+
+async def test_an_owed_greeting_rides_ahead_of_a_failed_outcome_as_a_leading_part(env, monkeypatch):
+    _wire(monkeypatch, FakeManager(_channel_route()), FakeChannel())
+    await _store().record_owed_greeting("bridge:line:+2000", "Welcome!", carries_pair_code=False)
+    failed = outcome_module._FailedOutcome(error="detail", reply=None)
+
+    outcome, burn = await pairing_module._deliver_with_owed_greeting("bridge:line:+2000", failed)
+
+    assert outcome == outcome_module._FailedOutcome(
+        error="detail", reply=None, leading_parts=(outcome_module._text_part("Welcome!"),)
+    )
+    assert burn == "bridge:line:+2000"
 
 
 # -------------------------------------------------- first-contact greeting carry

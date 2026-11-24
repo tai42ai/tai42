@@ -52,8 +52,8 @@ async def _deliver_api(store: ConversationRecordStore, record: ConversationRecor
         )
         return
 
-    # ``exclude_none`` omits the ``answer`` field entirely for a silent outcome, so the
-    # callback body is ``{message_id, thread_id, status: "silent"}`` with no answer key.
+    # ``exclude_none`` omits the ``answer`` field entirely for a silent outcome and for an error
+    # owed no line, so the callback body is ``{message_id, thread_id, status}`` with no answer key.
     body = record.answer_payload().model_dump_json(exclude_none=True).encode()
     signature = _pkg._sign(route.callback_secret, body)
     while True:

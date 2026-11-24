@@ -219,7 +219,6 @@ async def test_a_tool_caller_ask_with_reply_and_resume_lands(env, monkeypatch):
         reply_window=NO_REPLY_WINDOW,
     )
     assert isinstance(outcome, outcome_module._ResolvedOutcome)
-    assert outcome.answer_status == "answered"
 
 
 async def test_tool_target_parked_bound_as_jq_has_no_null_keys(env, monkeypatch):

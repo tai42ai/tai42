@@ -7,7 +7,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from tai42_contract.conversations import DeliveryReceipt
+from tai42_contract.conversations import AnswerPart, DeliveryReceipt
 
 from tai42_skeleton.conversations import records as records_module
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
@@ -69,6 +69,68 @@ def test_conversation_record_silent_rejects_answer_text():
 
     with pytest.raises(ValidationError, match="a silent record carries no answer text"):
         _record(answer_status="silent", answer="leaked")
+
+
+# -- a failed turn that owes no line -----------------------------------------
+
+
+def test_a_channel_silent_record_may_carry_an_error_with_no_answer():
+    record = _record(
+        delivery_status=DeliveryStatus.SILENT, answer_status="error", answer=None, error="tool run failed: boom"
+    )
+    assert record.answer is None
+    assert record.error == "tool run failed: boom"
+    assert "error" not in record.caller_view()
+
+
+def test_an_api_record_may_carry_an_error_with_no_answer_until_its_marker_is_delivered():
+    record = _record(
+        door="api",
+        delivery_status=DeliveryStatus.PENDING_DELIVERY,
+        answer_status="error",
+        answer=None,
+        error="tool run failed: boom",
+    )
+    assert record.answer_payload().model_dump(mode="json", exclude_none=True) == {
+        "message_id": record.message_id,
+        "thread_id": record.thread_id,
+        "status": "error",
+    }
+
+
+def test_a_channel_error_with_no_answer_is_silent():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="a channel-door error with no answer text is silent"):
+        _record(delivery_status=DeliveryStatus.PENDING_DELIVERY, answer_status="error", answer=None, error="boom")
+
+
+def test_an_error_with_no_answer_carries_no_parts():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="only an answered/error record with answer text carries answer_parts"):
+        _record(
+            door="api",
+            delivery_status=DeliveryStatus.PENDING_DELIVERY,
+            answer_status="error",
+            answer=None,
+            answer_parts=[AnswerPart(message="x")],
+            error="boom",
+        )
+
+
+def test_an_answered_record_still_carries_answer_text():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="an answered record carries answer text"):
+        _record(answer_status="answered", answer=None)
+
+
+def test_a_silent_record_carries_no_answered_outcome():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="disagree on whether this record carries an outcome"):
+        _record(delivery_status=DeliveryStatus.SILENT, answer_status="answered", answer="hi")
 
 
 # -- the successor_id / overlap-outcome model rule ----------------------------

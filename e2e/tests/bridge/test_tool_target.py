@@ -10,10 +10,14 @@ Silence differs by door. On the CHANNEL door a null-mapped reply is terminal ``s
 nothing is ever sent. On the API door it is a durable ``silent`` marker delivered through the
 same machine an answer takes: inline in a ``200`` under a sync wait, or POSTed as the signed
 callback body ``{message_id, thread_id, status: "silent"}`` (no ``answer`` key) otherwise.
+
+An EVENT turn on the api door whose target fails with no reply answers an ``error`` marker with
+no ``answer`` key the same way; the caller's own message still answers the error line.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 import pytest
@@ -27,6 +31,7 @@ from tai42_e2e.manifests import (
 from tai42_e2e.settings import HarnessSettings
 
 from ._bridge_support import (
+    ERROR_ANSWER_TEXT,
     TWILIO_INBOUND_PATH,
     BridgeHarness,
     post_inbound,
@@ -195,3 +200,92 @@ async def test_api_tool_target_null_reply_delivers_silent_marker_async(
 
     failed = await bridge.list_failed()
     assert any(item["message_id"] == message_id for item in failed["items"])
+
+
+async def _api_failing_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, start_expr: str) -> str:
+    exec_key = uniq(f"{tag}-exec")
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    route = uniq(f"{tag}-route").replace("_", "-")
+    await bridge.create_tool_api_route(
+        route_name=route,
+        tool="e2e_failed_terminal_reply",
+        execution_key=exec_key,
+        callback_url=_UNREACHABLE_CALLBACK,
+        start_expr=start_expr,
+    )
+    return route
+
+
+async def test_api_tool_target_failed_event_without_a_reply_answers_an_error_with_no_answer_inline(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    """The api door's sync wait on an event turn whose target fails with no reply: ``200`` with
+    ``status: "error"`` and NO ``answer`` key, the shape the signed callback body also carries; the
+    caller's own message on the same route still answers the error line."""
+    reason = uniq("evtapi-internal-detail")
+    route = await _api_failing_route(bridge, uniq, "evtapi", start_expr=f"{{reason: {json.dumps(reason)}}}")
+    caller = await bridge.mint_key(user_id=uniq("evtapi-caller"), scopes=["e2e-all"])
+    user = uniq("evtapi-user")
+
+    message = await bridge.api(token=caller).post(
+        f"/api/conversations/{route}/messages",
+        json={"external_user_id": user, "text": "ping", "wait_seconds": 20},
+        expect=200,
+    )
+    assert message["answer"]["status"] == "error"
+    assert message["answer"]["answer"] == ERROR_ANSWER_TEXT
+
+    data = await bridge.api(token=caller).post(
+        f"/api/conversations/{route}/events",
+        json={
+            "address": user,
+            "event": {"event_id": uniq("evtapi-evt"), "kind": "provider.update", "payload": {}},
+            "wait_seconds": 20,
+        },
+        expect=200,
+    )
+    answer = data["answer"]
+    assert answer["status"] == "error"
+    assert answer["message_id"] == data["message_id"]
+    assert "answer" not in answer, f"an error owed no line carries no answer key, got {answer!r}"
+
+    # Settled delivered inline; the unreachable callback was suppressed, never POSTed.
+    record = await bridge.get_record(route, data["message_id"])
+    assert record["answer_status"] == "error"
+    assert record["answer"] is None
+    assert reason in record["error"]
+    assert record["delivery_status"] == "delivered"
+
+
+async def test_api_tool_target_failed_event_with_a_reply_answers_the_reply_inline(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    reason = uniq("evtapireply-internal-detail")
+    reply = f"That update could not be applied ({uniq('evtapireply')})."
+    route = await _api_failing_route(
+        bridge,
+        uniq,
+        "evtapireply",
+        start_expr=f"{{reason: {json.dumps(reason)}, reply: {json.dumps(reply)}}}",
+    )
+    caller = await bridge.mint_key(user_id=uniq("evtapireply-caller"), scopes=["e2e-all"])
+    user = uniq("evtapireply-user")
+    await bridge.api(token=caller).post(
+        f"/api/conversations/{route}/messages",
+        json={"external_user_id": user, "text": "ping", "wait_seconds": 20},
+        expect=200,
+    )
+
+    data = await bridge.api(token=caller).post(
+        f"/api/conversations/{route}/events",
+        json={
+            "address": user,
+            "event": {"event_id": uniq("evtapireply-evt"), "kind": "provider.update", "payload": {}},
+            "wait_seconds": 20,
+        },
+        expect=200,
+    )
+    assert data["answer"]["status"] == "error"
+    assert data["answer"]["answer"] == reply
+    record = await bridge.get_record(route, data["message_id"])
+    assert reason in record["error"]

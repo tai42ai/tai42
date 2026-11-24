@@ -10,6 +10,10 @@ The web channel is the medium here because it has no vendor: the visitor's own S
 the client-side surface an event's reply either does or does not reach. The route's tool
 echoes the surfaced ``turn``/``event`` payload keys back as a JSON reply, so the
 participant's transcript is proof the keys reached the tool with the event's own inbound identity.
+
+An event turn the participant did not send that fails with no reply of the target's own
+delivers nothing: the failure stays on the record as a silent error, while a message turn on
+the same route still reads the error line.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ import pytest
 
 from tai42_e2e.webchat import WebChatClient
 
-from ._bridge_support import BridgeHarness
+from ._bridge_support import ERROR_ANSWER_TEXT, BridgeHarness, outbound_message, wait_record_status
 
 _AGENT = "tools_agent"
 
@@ -80,6 +84,31 @@ async def _web_tool_route(bridge: BridgeHarness, uniq: Callable[[str], str], tag
     return route_name, identity
 
 
+async def _web_failing_route(
+    bridge: BridgeHarness, uniq: Callable[[str], str], tag: str, *, reason: str, reply_prefix: str | None = None
+) -> tuple[str, str]:
+    """Create a ``target_kind=tool`` web route whose tool fails every turn with ``reason``.
+
+    With ``reply_prefix`` the failure carries its own reply, ``"<reply_prefix> <inbound kind>"``,
+    so a message turn's reply and an event turn's reply are told apart on the visitor's stream;
+    without it the target speaks no line. Returns ``(route name, our_identity)``.
+    """
+    identity = uniq(f"{tag}-site").replace("_", "-")
+    route_name = uniq(f"{tag}-route").replace("_", "-")
+    exec_key = uniq(f"{tag}-exec")
+    reply = "" if reply_prefix is None else f", reply: ({json.dumps(reply_prefix + ' ')} + .turn.inbound.kind)"
+    await bridge.mint_key(user_id=exec_key, scopes=["e2e-all"])
+    await bridge.create_tool_channel_route(
+        route_name=route_name,
+        tool="e2e_failed_terminal_reply",
+        execution_key=exec_key,
+        channel="web",
+        our_identity=identity,
+        start_expr=f"{{reason: {json.dumps(reason)}{reply}}}",
+    )
+    return route_name, identity
+
+
 async def _open_visitor(bridge: BridgeHarness, identity: str) -> WebChatClient:
     web, page = await WebChatClient.open_page(_base_url(bridge), identity, store_url=bridge.stack.resources.redis_url)
     assert page.status_code == 200, page.text
@@ -95,6 +124,12 @@ async def _out_replies(web: WebChatClient) -> list[dict]:
         if event == "chat.message" and data.get("direction") == "out":
             out.append(json.loads(data["text"]))
     return out
+
+
+async def _out_texts(web: WebChatClient) -> list[str]:
+    """Every outbound text in the visitor's transcript replay, in order."""
+    replayed = await web.frames()
+    return [data["text"] for event, data in replayed if event == "chat.message" and data.get("direction") == "out"]
 
 
 async def _listed_thread(bridge: BridgeHarness, route_name: str, expect_address: str) -> str:
@@ -217,3 +252,66 @@ async def test_event_door_refuses_an_unknown_thread_and_an_agent_target(
         },
         expect=409,
     )
+
+
+@pytest.mark.needs("setting:seeded-access-control", "store:redis")
+async def test_a_failed_event_turn_without_a_reply_delivers_nothing_while_a_message_turn_reads_the_error_line(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    reason = uniq("evtfail-internal-detail")
+    route_name, identity = await _web_failing_route(bridge, uniq, "evtfail", reason=reason)
+    web = await _open_visitor(bridge, identity)
+
+    # The participant's own message fails with no target reply: the visitor reads the error line.
+    sent = await web.send(uniq("evtfail-in"))
+    assert sent.status_code == 200, sent.text
+    await web.frames(until=outbound_message(ERROR_ANSWER_TEXT), deadline=40.0)
+    texts_before = await _out_texts(web)
+
+    # An event on the same thread fails the same way: nothing reaches the visitor, and the record
+    # keeps the failure as a silent error carrying the internal detail.
+    accepted = await bridge.api().post(
+        f"/api/conversations/{route_name}/events",
+        json={
+            "address": web.visitor_id,
+            "event": {"event_id": uniq("evtfail-evt"), "kind": "provider.update", "payload": {}},
+        },
+        expect=202,
+    )
+    record = await wait_record_status(bridge, route_name, accepted["message_id"], {"silent"}, deadline=40.0)
+    assert record["answer_status"] == "error"
+    assert record["answer"] is None
+    assert reason in record["error"]
+    assert await _out_texts(web) == texts_before, "a failed event turn with no reply delivered a line"
+
+
+@pytest.mark.needs("setting:seeded-access-control", "store:redis")
+async def test_a_failed_event_turn_with_a_reply_delivers_the_reply(
+    bridge: BridgeHarness, uniq: Callable[[str], str]
+) -> None:
+    reason = uniq("evtreply-internal-detail")
+    prefix = f"That update could not be applied ({uniq('evtreply')})."
+    route_name, identity = await _web_failing_route(bridge, uniq, "evtreply", reason=reason, reply_prefix=prefix)
+    web = await _open_visitor(bridge, identity)
+
+    sent = await web.send(uniq("evtreply-in"))
+    assert sent.status_code == 200, sent.text
+    await web.frames(until=outbound_message(f"{prefix} message"), deadline=40.0)
+
+    accepted = await bridge.api().post(
+        f"/api/conversations/{route_name}/events",
+        json={
+            "address": web.visitor_id,
+            "event": {"event_id": uniq("evtreply-evt"), "kind": "provider.update", "payload": {}},
+        },
+        expect=202,
+    )
+    await web.frames(until=outbound_message(f"{prefix} event"), deadline=40.0)
+    texts = await _out_texts(web)
+    assert not any(ERROR_ANSWER_TEXT in text for text in texts), texts
+    assert not any(reason in text for text in texts), f"the internal reason leaked: {texts!r}"
+
+    record = await bridge.get_record(route_name, accepted["message_id"])
+    assert record["answer_status"] == "error"
+    assert record["answer"] == f"{prefix} event"
+    assert reason in record["error"]

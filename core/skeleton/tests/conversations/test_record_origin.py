@@ -1,6 +1,6 @@
 """The ``origin`` field on a conversation record: a ``client`` record answers a non-blank
-inbound; an ``operator`` record carries no inbound, is always answered, names its sender, and
-publishes ``origin`` in the caller-safe view.
+inbound; an ``operator`` record carries no inbound and names its sender (a hand send is always
+answered, a completion record is answered or error); ``origin`` is published in the caller-safe view.
 """
 
 from __future__ import annotations
@@ -83,8 +83,8 @@ def test_client_record_refuses_empty_inbound_attachments():
         _record(inbound_attachments=[])
 
 
-def test_operator_record_must_be_answered():
-    with pytest.raises(ValueError, match="operator record is always answered"):
+def test_a_completion_record_is_answered_or_error():
+    with pytest.raises(ValueError, match="a completion record is answered or error"):
         _record(
             origin="operator",
             inbound_text="",
@@ -170,9 +170,55 @@ def test_message_record_refuses_an_event_payload():
         _record(inbound_event={"event_id": "E1"})
 
 
-def test_operator_record_is_never_an_event():
+def test_a_completion_record_answering_an_event_turn_is_valid():
+    record = _record(
+        origin="operator",
+        operator_send=False,
+        inbound_kind="event",
+        inbound_text="",
+        caller_principal="system:agent-resume",
+    )
+    assert record.inbound_kind == "event"
+    assert record.inbound_event is None
+
+
+def test_an_operator_record_refuses_an_event_payload():
+    with pytest.raises(ValueError, match="operator record carries no inbound_event"):
+        _record(
+            origin="operator",
+            operator_send=False,
+            inbound_kind="event",
+            inbound_text="",
+            inbound_event={"event_id": "E1", "kind": "provider.update", "payload": {}},
+            caller_principal="system:agent-resume",
+        )
+
+
+def test_a_failed_completion_record_carries_the_error_state():
+    record = _record(
+        origin="operator",
+        operator_send=False,
+        inbound_text="",
+        caller_principal="system:agent-resume",
+        answer_status="error",
+        answer="Sorry",
+        error="tool run failed: boom",
+    )
+    assert record.answer_status == "error"
+
+
+def test_an_operator_hand_send_is_always_an_answered_message():
     with pytest.raises(ValueError, match="never an event"):
-        _record(origin="operator", inbound_kind="event", inbound_text="", caller_principal="op-1")
+        _record(origin="operator", operator_send=True, inbound_kind="event", inbound_text="", caller_principal="op-1")
+    with pytest.raises(ValueError, match="operator record is always answered"):
+        _record(
+            origin="operator",
+            operator_send=True,
+            inbound_text="",
+            caller_principal="op-1",
+            answer_status="error",
+            error="boom",
+        )
 
 
 def test_caller_view_publishes_the_event_provenance():
