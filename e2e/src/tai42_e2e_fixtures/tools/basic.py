@@ -421,11 +421,12 @@ async def e2e_failed_terminal(reason: str) -> str:
 
 
 @tai42_app.tools.tool(tags={"e2e"})
-async def e2e_failed_terminal_reply(reason: str, reply: str) -> str:
-    """Reach a FAILED terminal at start carrying a participant-facing reply.
+async def e2e_failed_terminal_reply(reason: str, reply: str | None = None) -> str:
+    """Reach a FAILED terminal at start, carrying a participant-facing reply when one is given.
 
     Raises the contract's typed run failure with the internal ``{"reason": reason}`` outcome and
-    ``reply`` as the text a conversation door shows the participant in place of its fixed line.
+    ``reply`` as the text a conversation door shows the participant in place of its fixed line;
+    ``None`` is a target that speaks no line of its own on failure.
     """
     from tai42_contract.interactions import RunTerminalFailed
 
