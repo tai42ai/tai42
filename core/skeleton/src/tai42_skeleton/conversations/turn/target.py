@@ -25,8 +25,9 @@ from tai42_skeleton.conversations.persons import PersonErasingError
 from tai42_skeleton.conversations.thread_ids import person_id_of
 from tai42_skeleton.conversations.turn import accessors, agent_turn, pairing, tool_turn
 from tai42_skeleton.conversations.turn.context import _conversation_attribution, _conversation_state_context
+from tai42_skeleton.conversations.turn.failed_turn import announce_failed_turn
 from tai42_skeleton.conversations.turn.outcome import _SilentOutcome, _tool_error, _ToolOutcome
-from tai42_skeleton.conversations.turn.record import _log_unvoiced_failure, _outcome_record
+from tai42_skeleton.conversations.turn.record import _outcome_record
 from tai42_skeleton.conversations.turn.reply_window import read_turn_reply_window
 from tai42_skeleton.conversations.turn.routing import _Multichannel
 from tai42_skeleton.states.context import state_context
@@ -338,7 +339,8 @@ async def _persist_completed(
     channel-door yielded turn moves straight to its terminal ``superseded`` state; the API-door
     split sits at ``pending_delivery`` and takes the ``complete_turn`` branch). The transition
     is guarded on the record still being at intake, so a turn finishing after a re-drive
-    resolved its record raises rather than overwriting the outcome the client was given.
+    resolved its record raises rather than overwriting the outcome the client was given. A failed
+    turn is announced (:func:`announce_failed_turn`) only once its guarded persist landed.
 
     ``owed_greeting_thread_id`` (set by :func:`_resolve_turn_record` when this record delivers a
     first-contact greeting) names the thread whose owed greeting is BURNED — but only after the
@@ -355,7 +357,7 @@ async def _persist_completed(
             f"(complete_record answered {outcome} for a {completed.delivery_status.value!r} outcome); its outcome "
             "was resolved elsewhere and this turn's outcome is discarded"
         )
-    _log_unvoiced_failure(completed)
+    await announce_failed_turn(completed)
     if owed_greeting_thread_id is not None:
         await store.burn_owed_greeting(owed_greeting_thread_id)
     return completed

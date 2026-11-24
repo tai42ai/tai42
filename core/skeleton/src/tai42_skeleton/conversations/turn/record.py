@@ -7,7 +7,6 @@ no-reply, a failure owed no line) to its door-appropriate shape.
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Literal
 
@@ -31,8 +30,6 @@ from tai42_skeleton.conversations.turn.outcome import (
     _ToolOutcome,
     failure_line,
 )
-
-logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
 
 def _new_record(
@@ -276,21 +273,3 @@ def _outcome_record(
         | _outcome_fields(intake.door, outcome, route, inbound_kind=intake.inbound_kind)
         | {"updated_at": time.time()}
     )
-
-
-def _log_unvoiced_failure(record: ConversationRecord) -> None:
-    """Log at ERROR a stored record whose turn failed and sends the participant no line.
-
-    Such a failure reaches no one through the conversation, so its detail is named here beside the
-    record that keeps it; a failure that delivers a line is logged where it happened. Called only
-    once the record's write has landed, so the line never names an outcome that was not stored.
-    """
-    if record.answer_status == "error" and record.answer is None:
-        logger.error(
-            "conversations: the %s turn %s on route %r failed and owes the participant no line; nothing is "
-            "sent to them and the record carries the error: %s",
-            record.inbound_kind,
-            record.message_id,
-            record.route_name,
-            record.error,
-        )

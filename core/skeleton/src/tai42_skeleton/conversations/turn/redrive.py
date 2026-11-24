@@ -15,8 +15,9 @@ from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.delivery import spawn_delivery
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.records import ConversationRecordStore
+from tai42_skeleton.conversations.turn.failed_turn import announce_failed_turn
 from tai42_skeleton.conversations.turn.outcome import _FailedOutcome
-from tai42_skeleton.conversations.turn.record import _log_unvoiced_failure, _outcome_record
+from tai42_skeleton.conversations.turn.record import _outcome_record
 
 logger = logging.getLogger("tai42_skeleton.conversations.turn")
 
@@ -135,7 +136,9 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
 
     The outcome goes through the same seam a live failed turn takes (:func:`_outcome_record`), so
     a turn the participant sent delivers the route's ``reply_texts.error`` (else the built-in line)
-    and an event turn delivers nothing, its failure kept on the record and in the ERROR log. The
+    and an event turn delivers nothing, its failure kept on the record and in the ERROR log. Either
+    way the stored failure is announced (:func:`announce_failed_turn`), and a re-drive that lost the
+    guard announces nothing. The
     route is looked up best-effort: ANY failure (manager unavailable, route gone, exception)
     resolves the line without it, so this repair path is never less robust than the built-in
     default — the lookup only ever upgrades the text, never blocks the outcome.
@@ -156,7 +159,7 @@ async def _fail_stranded_turn(store: ConversationRecordStore, record: Conversati
             outcome,
         )
         return
-    _log_unvoiced_failure(completed)
+    await announce_failed_turn(completed)
     logger.error(
         "conversations: %s record %s on route %r was stranded mid-turn; the turn is NOT re-run and it takes "
         "an error outcome instead",

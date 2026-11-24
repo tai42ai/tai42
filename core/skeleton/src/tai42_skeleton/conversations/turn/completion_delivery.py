@@ -26,13 +26,14 @@ from tai42_skeleton.conversations.person_thread import newest_person_thread_reco
 from tai42_skeleton.conversations.thread_ids import BRIDGE_THREAD_PREFIX, PersonThreadId, ThreadIdError, parse_thread_id
 from tai42_skeleton.conversations.turn.context import _turn_block
 from tai42_skeleton.conversations.turn.errors import CompletionDeliveryError
+from tai42_skeleton.conversations.turn.failed_turn import announce_failed_turn
 from tai42_skeleton.conversations.turn.outcome import (
     _FailedOutcome,
     _ResolvedOutcome,
     _serialize_structured,
     _text_part,
 )
-from tai42_skeleton.conversations.turn.record import _log_unvoiced_failure, _new_record, _outcome_fields
+from tai42_skeleton.conversations.turn.record import _new_record, _outcome_fields
 from tai42_skeleton.conversations.turn.reply_window import read_turn_reply_window
 from tai42_skeleton.conversations.turn.tool_turn import _reply_parts, _tool_reply
 from tai42_skeleton.interactions.authorization import assert_delivery_authorized
@@ -208,8 +209,10 @@ async def _mint_completion(
     the delivery ``route`` and who sent the turn): an answer, or a failure with its detail kept on
     the record and the line :func:`failure_line` owes. A failure owed no line (a turn the
     participant did not send, failed with no reply) sends nothing — terminal ``silent`` on the
-    channel door, an ``error`` marker with no answer on the api door — and is logged at ERROR with
-    its detail (:func:`_log_unvoiced_failure`). Every record but a terminal ``silent`` one goes to the delivery machine.
+    channel door, an ``error`` marker with no answer on the api door. Once the record is written, a
+    failure is announced (:func:`announce_failed_turn`: the ERROR log for a failure owed no line, the
+    ``conversations_turn_failed`` event for every failure). Every record but a terminal ``silent``
+    one goes to the delivery machine.
     """
     record = _new_record(
         route=route,
@@ -224,7 +227,7 @@ async def _mint_completion(
         **_outcome_fields(route.door, outcome, route, inbound_kind=inbound_kind),
     )
     await cache.get_conversations_manager().records.create_record(record, route=route, refresh_mode=True)
-    _log_unvoiced_failure(record)
+    await announce_failed_turn(record)
     if record.delivery_status is not DeliveryStatus.SILENT:
         spawn_delivery(completion_id)
     return {"message_id": completion_id}
