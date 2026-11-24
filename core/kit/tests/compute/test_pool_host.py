@@ -62,7 +62,7 @@ def ended(pid):
         with open(f"/proc/{pid}/stat") as stat:
             zombie = stat.read().rpartition(")")[2].split()[0] == "Z"
         return zombie and len(os.listdir(f"/proc/{pid}/task")) == 1
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
 
 
@@ -715,7 +715,7 @@ def test_a_host_that_ends_before_it_reads_the_search_path_fails_its_start_and_le
                 with open(f"/proc/{{entry}}/stat") as stat:
                     if stat.read().rpartition(")")[2].split()[1] == str(os.getpid()):
                         children.append(entry)
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 continue  # the process ended as the list was read
         seen["children"] = children
         report(seen)
