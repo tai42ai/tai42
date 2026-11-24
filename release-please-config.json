@@ -12,6 +12,7 @@
   "packages": {
     "core/contract": {
       "package-name": "tai42-contract",
+      "release-as": "31.2.0",
       "component": "tai42-contract",
       "skip-changelog": true,
       "extra-files": [
