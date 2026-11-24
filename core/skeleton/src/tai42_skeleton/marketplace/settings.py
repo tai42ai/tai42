@@ -28,7 +28,7 @@ class MarketplaceSettings(TaiBaseSettings):
     model_config = SettingsConfigDict(env_prefix="MARKETPLACE_")
 
     # Base URL of the marketplace registry's public API.
-    url: str = "https://marketplace.tai42.ai"
+    url: str = "https://marketplace.mgmt.tai42.ai"
 
     # Periodically re-fetch advisories for the installed plugins. A background
     # outbound call, so it is explicit and documented: default on, loud startup
