@@ -267,9 +267,13 @@ class PayloadRef(BaseModel):
 class StepRole(StrEnum):
     """What a record is in a run's step outline; a record without the marker is a step."""
 
-    GROUPING = "grouping"  # a framework grouping node: holds steps, is not one
+    GROUPING = "grouping"  # a framework grouping record: holds steps, is not one
     SUB_STEP = "sub_step"  # a step's internal evaluation: part of a step, not one
+    INTERNAL = "internal"  # the producer's own work around steps (a store wait, a phase): not part of the outline
 
+
+# The step-role values that mark a record as not a step: every role does.
+NON_STEP_ROLES: frozenset[str] = frozenset(StepRole)
 
 # Metadata key of the record's :class:`StepRole`.
 STEP_ROLE_METADATA_KEY = "tai42.step_role"

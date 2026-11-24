@@ -26,7 +26,7 @@ from langgraph.checkpoint.base import create_checkpoint, empty_checkpoint
 from tai42_kit.db import database_settings
 from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_saver_from_resource
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("noop_monitoring")]
 
 _OPT_IN_ENV = "TAI42_KIT_REAL_PG"
 

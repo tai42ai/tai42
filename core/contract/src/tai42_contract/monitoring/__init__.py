@@ -20,6 +20,7 @@ from tai42_contract.monitoring.errors import (
 from tai42_contract.monitoring.models import (
     DEFAULT_LEVEL,
     GENERATION_MESSAGE_METADATA_KEY,
+    NON_STEP_ROLES,
     PAYLOAD_REF_KEY,
     PROMOTED_METADATA_KEYS,
     RESERVED_KEY_PREFIX,
@@ -77,6 +78,7 @@ __all__ = [
     "GENERATION_MESSAGE_METADATA_KEY",
     "MONITORING_PARENT_SPAN_ID_KEY",
     "MONITORING_TRACE_ID_KEY",
+    "NON_STEP_ROLES",
     "PAYLOAD_REF_KEY",
     "PROMOTED_METADATA_KEYS",
     "RESERVED_KEY_PREFIX",

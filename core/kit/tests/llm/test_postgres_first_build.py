@@ -22,7 +22,7 @@ pytest.importorskip("langgraph.store.postgres")
 from tai42_kit.llm.checkpoint.checkpoint import create_checkpoint_resource, get_saver_from_resource
 from tai42_kit.llm.store.store import create_store_resource, get_store_from_resource
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("noop_monitoring")]
 
 _BUILDERS = 8
 _ROUNDS = 5

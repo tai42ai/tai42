@@ -26,6 +26,8 @@ from tai42_kit.llm.checkpoint.checkpoint_registry import CheckpointRegistry
 
 from ._real_redis import real_redis_url
 
+pytestmark = pytest.mark.usefixtures("noop_monitoring")
+
 _METADATA: dict[str, Any] = {"source": "input", "step": 0, "parents": {}}
 
 

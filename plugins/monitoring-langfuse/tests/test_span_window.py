@@ -36,7 +36,7 @@ def _steps(fake):
         metadata={"attributes.tai42.metadata": '{"k": "' + "v" * 300 + '"}'},
     )
     fake.add(
-        id="node",
+        id="chain",
         trace_id="t1",
         parent_id="root",
         type="CHAIN",
@@ -60,8 +60,8 @@ def _steps(fake):
         start=T0 + timedelta(seconds=5),
         metadata={"attributes.tai42.step_role": "sub_step"},
     )
-    fake.add(id="gen", trace_id="t1", parent_id="node", type="GENERATION", start=T0 + timedelta(seconds=6))
-    fake.add(id="evt", trace_id="t1", parent_id="node", type="EVENT", start=T0 + timedelta(seconds=6))
+    fake.add(id="gen", trace_id="t1", parent_id="chain", type="GENERATION", start=T0 + timedelta(seconds=6))
+    fake.add(id="evt", trace_id="t1", parent_id="chain", type="EVENT", start=T0 + timedelta(seconds=6))
     fake.add(id="other-run", trace_id="t2", type="TOOL", start=T0 + timedelta(seconds=8), name="echo")
     fake.add(id="later", trace_id="t3", type="TOOL", start=T1)
 
@@ -69,7 +69,7 @@ def _steps(fake):
 async def test_one_item_per_step_newest_first(fake, reader):
     _steps(fake)
     items = await reader.list_spans_in_window(T0, T1)
-    assert [i.id for i in items] == ["other-run", "node", "tool", "root"]
+    assert [i.id for i in items] == ["other-run", "chain", "tool", "root"]
     tool = items[2]
     assert tool.parent_id == "root"
     assert tool.name == "echo"
@@ -79,6 +79,21 @@ async def test_one_item_per_step_newest_first(fake, reader):
     assert tool.output == "ok"
     assert tool.metadata == {"attributes.tai42.metadata": {"k": "v" * 300}}
     assert tool.end == T0 + timedelta(seconds=2)
+
+
+async def test_an_internal_record_is_not_an_item(fake, reader):
+    _steps(fake)
+    fake.add(
+        id="store-wait",
+        trace_id="t1",
+        parent_id="chain",
+        type="CHAIN",
+        name="checkpoint:get_tuple",
+        start=T0 + timedelta(seconds=5),
+        metadata={"attributes.tai42.step_role": "internal"},
+    )
+    items = await reader.list_spans_in_window(T0, T1)
+    assert [i.id for i in items] == ["other-run", "chain", "tool", "root"]
 
 
 async def test_the_window_read_sends_one_filter(fake, reader):
@@ -100,7 +115,7 @@ async def test_the_window_read_sends_one_filter(fake, reader):
 async def test_run_and_kind_narrow_the_steps(fake, reader):
     _steps(fake)
     assert [i.id for i in await reader.list_spans_in_window(T0, T1, run="t1", kind=SpanKind.TOOL)] == ["tool"]
-    assert [i.id for i in await reader.list_spans_in_window(T0, T1, kind=SpanKind.CHAIN)] == ["node", "root"]
+    assert [i.id for i in await reader.list_spans_in_window(T0, T1, kind=SpanKind.CHAIN)] == ["chain", "root"]
 
 
 @pytest.mark.parametrize("kind", [SpanKind.LLM, SpanKind.EVENT])
@@ -164,10 +179,10 @@ async def test_a_step_marker_that_does_not_decode_fails_loudly(fake, reader):
 @pytest.mark.parametrize(
     ("order_by", "expected"),
     [
-        (OrderBy(field="start", direction="asc"), ["root", "tool", "node", "other-run"]),
-        (OrderBy(field="duration", direction="desc"), ["root", "node", "tool", "other-run"]),
-        (OrderBy(field="name", direction="asc"), ["other-run", "tool", "node", "root"]),
-        (OrderBy(field="id", direction="desc"), ["tool", "root", "other-run", "node"]),
+        (OrderBy(field="start", direction="asc"), ["root", "tool", "chain", "other-run"]),
+        (OrderBy(field="duration", direction="desc"), ["root", "chain", "tool", "other-run"]),
+        (OrderBy(field="name", direction="asc"), ["other-run", "tool", "chain", "root"]),
+        (OrderBy(field="id", direction="desc"), ["tool", "root", "other-run", "chain"]),
     ],
 )
 async def test_items_sort_with_missing_keys_last(fake, reader, order_by, expected):

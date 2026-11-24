@@ -1,9 +1,10 @@
-"""Checkpoint resource and saver creation: one resource per store, a guard and the shared values around every saver.
+"""Checkpoint resource and saver creation: one resource per store; a guard, shared values and timing on every saver.
 
 Every saver a graph checkpoints through is built here from its store's registration
 (:mod:`tai42_kit.llm.checkpoint.providers`): the registration opens the store and builds its saver,
-and the kit installs the serialization guard and wraps the saver with the shared values
-(:mod:`tai42_kit.llm.checkpoint.shared_values`), the same way for every store.
+and the kit installs the serialization guard, wraps the saver with the shared values
+(:mod:`tai42_kit.llm.checkpoint.shared_values`) and times its store waits outermost
+(:mod:`tai42_kit.llm.checkpoint.timing`), the same way for every store.
 """
 
 from __future__ import annotations
@@ -245,7 +246,8 @@ def get_saver_from_resource(provider: str, resource: CheckpointResource) -> Base
     """The saver a graph checkpoints through on ``resource``: the store's saver, guarded and wrapped.
 
     This is the one place a saver is built for a store's own retention, so every saver serializes
-    through the guard and stores its large values once where sharing is on.
+    through the guard, stores its large values once where sharing is on, and records its store waits
+    as spans of the live trace.
     """
     registration = checkpoint_provider(provider)
     _same_provider(resource, provider)
@@ -271,7 +273,7 @@ def saver_view_waiting(provider: str, retention: ThreadRetention | None) -> int 
 async def create_saver_with_waiting(
     provider: str, resource: CheckpointResource, waiting_minutes: int
 ) -> BaseCheckpointSaver:
-    """A saver over ``resource`` whose writes carry ``waiting_minutes`` as their key TTL, guarded and wrapped.
+    """A saver over ``resource`` whose writes carry ``waiting_minutes`` as their key TTL, guarded, wrapped and timed.
 
     It reads, writes and deletes what the resource's own saver does, its shared values included; only
     the TTL it stamps differs.
@@ -286,13 +288,15 @@ def _apply_features(
     registration: CheckpointProvider, saver: BaseCheckpointSaver, values: CheckpointValueStore
 ) -> BaseCheckpointSaver:
     from tai42_kit.llm.checkpoint.shared_values import SharedValuesSaver
+    from tai42_kit.llm.checkpoint.timing import TimedSaver
 
     compress = llm_provider_settings().checkpoint_inline_compress_bytes
     _guard_saver_serialization(saver, registration, compress)
-    return SharedValuesSaver(
+    shared = SharedValuesSaver(
         saver,
         registration,
         values,
         shared_value_threshold(registration.name),
         registration.value_encoding(saver, compress),
     )
+    return TimedSaver(shared, provider=registration.name)

@@ -23,6 +23,8 @@ from tai42_kit.llm.checkpoint.stores import sqlite as sqlite_store_mod
 
 from .conftest import client_target, install_fake_named_pool, install_refusing_probe, install_spy_client, redis_retry_of
 
+pytestmark = pytest.mark.usefixtures("noop_monitoring")
+
 
 @pytest.fixture(autouse=True)
 def _no_store_side_effects(monkeypatch):
@@ -673,16 +675,25 @@ def _resource(provider, handle):
     return cp.CheckpointResource(provider, handle, ledger=cast("Any", object()), values=cast("Any", _Values()))
 
 
-def test_every_store_hands_a_graph_its_saver_guarded_and_wrapped():
+def _shared(out: Any) -> Any:
+    """The shared-values saver a built saver times: the timing saver is outermost, the shared values inside it."""
     from tai42_kit.llm.checkpoint.shared_values import SharedValuesSaver
+    from tai42_kit.llm.checkpoint.timing import TimedSaver
 
+    assert isinstance(out, TimedSaver)
+    assert isinstance(out.inner, SharedValuesSaver)
+    return out.inner
+
+
+def test_every_store_hands_a_graph_its_saver_guarded_wrapped_and_timed():
     memory_saver = _FakeSaver()
     resource = _resource("memory", memory_saver)
     out: Any = cp.get_saver_from_resource("memory", resource)
-    assert isinstance(out, SharedValuesSaver)
-    assert out.inner is memory_saver
-    assert out.values is resource.values
-    assert out.registration is checkpoint_provider("memory")
+    shared = _shared(out)
+    assert out.provider == "memory"
+    assert shared.inner is memory_saver
+    assert shared.values is resource.values
+    assert shared.registration is checkpoint_provider("memory")
     assert isinstance(memory_saver.serde, cp._GuardedSerializer)
     assert out.serde is memory_saver.serde
 
@@ -694,7 +705,7 @@ def test_the_redis_store_hands_its_own_saver_with_the_faithful_codec():
     out: Any = cp.get_saver_from_resource(
         "redis", _resource("redis", redis_store_mod.RedisHandle(cast("Any", saver), cast("Any", object())))
     )
-    assert out.inner is saver
+    assert _shared(out).inner is saver
     serde: Any = saver.serde
     assert isinstance(serde._inner, FaithfulRedisSerializer)
     assert isinstance(serde._codec, RedisFaithfulCodec)
@@ -705,8 +716,8 @@ def test_the_sqlite_store_builds_its_saver_on_the_connection(monkeypatch):
     saver_mod.AsyncSqliteSaver = _FakeSaver
     monkeypatch.setitem(sys.modules, "langgraph.checkpoint.sqlite.aio", saver_mod)
     out: Any = cp.get_saver_from_resource("sqlite", _resource("sqlite", "conn"))
-    assert isinstance(out.inner, _FakeSaver)
-    assert out.inner.resource == "conn"
+    assert isinstance(_shared(out).inner, _FakeSaver)
+    assert _shared(out).inner.resource == "conn"
     # The saver the graph checkpoints through has its serializer guarded, with no codec.
     assert isinstance(out.serde, cp._GuardedSerializer)
     assert out.serde._codec is None
@@ -718,8 +729,8 @@ async def test_the_postgres_store_builds_the_library_saver_with_the_blob_codec()
     from tai42_kit.llm.checkpoint.envelope import BlobCompressCodec
 
     out: Any = cp.get_saver_from_resource("postgres", _resource("postgres", "pool"))
-    assert type(out.inner) is AsyncPostgresSaver
-    assert out.inner.conn == "pool"
+    assert type(_shared(out).inner) is AsyncPostgresSaver
+    assert _shared(out).inner.conn == "pool"
     assert isinstance(out.serde, cp._GuardedSerializer)
     assert isinstance(out.serde._codec, BlobCompressCodec)
 
@@ -766,7 +777,7 @@ async def test_the_saver_is_built_with_the_resolved_threshold(
     elif provider == "postgres":
         handle = "pool"
     out: Any = cp.get_saver_from_resource(provider, _resource(provider, handle))
-    assert out.threshold == expected
+    assert _shared(out).threshold == expected
 
 
 def test_get_saver_unknown_provider_raises():
