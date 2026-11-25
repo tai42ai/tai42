@@ -169,6 +169,11 @@ async def test_deliver_parks_correlation_with_on_mismatch_and_wording(fake_redis
     assert stored.wording.answer.rejected == "Only yes or no, please. {reason}"
 
 
+def test_channel_confirms_delivery_by_receipt():
+    # A send returns once Twilio queued the message; its delivery arrives on the status webhook.
+    assert TwilioChannel.confirms_delivery_by_receipt is True
+
+
 def test_channel_advertises_media_only_and_no_other_capability():
     # MMS media is real, so media is advertised. SMS has no tappable buttons, native map
     # pin, template component model, or fillable form — so EVERY other capability flag is

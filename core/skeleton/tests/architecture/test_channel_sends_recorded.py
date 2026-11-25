@@ -20,8 +20,8 @@ _SEND_METHODS = frozenset({"notify", "deliver"})
 # notice, the participant notices, ``notify_user`` and the ask delivery.
 _RECORDED_SITES = frozenset(
     {
-        ("conversations/delivery_channel.py", "_run_channel_send_loop"),
-        ("conversations/delivery_channel.py", "_notify_refusal"),
+        ("conversations/delivery_channel.py", "_run_channel_send_loop._send_part"),
+        ("conversations/channel_refusal.py", "notify_refusal"),
         ("channels/participant_notice.py", "send_participant_notice.send"),
         ("channels/notify.py", "_send_with_telemetry.send"),
         ("interactions/ask/delivery.py", "_attempt_loop"),

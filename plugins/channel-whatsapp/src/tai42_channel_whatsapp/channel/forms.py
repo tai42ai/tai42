@@ -18,6 +18,7 @@ from tai42_contract.interactions.models import FormReactions, FormWording
 
 from tai42_channel_whatsapp.channel.flow_publishing import resolve_flow_id
 from tai42_channel_whatsapp.channel.media import send_media_prelude
+from tai42_channel_whatsapp.channel.send_order import await_previous_delivery
 from tai42_channel_whatsapp.client import (
     SentMessage,
     send_flow,
@@ -538,7 +539,8 @@ async def send_form_notification(
 
     Any display media rides as the standard prelude (the ``link`` items as one
     text line-block, each ``image`` as its own message), then the Flow message
-    LAST — the actionable prompt stays at the foot of the chat. The Flow is
+    LAST — the actionable prompt stays at the foot of the chat, sent once the medium
+    reports the media delivered. The Flow is
     resolved exactly like a form ask's (one published Flow per answer
     schema, found on the WABA by name, else created, and cached under the WABA id),
     and the answer schema itself (with its
@@ -644,6 +646,7 @@ async def send_form_notification(
         # The caller-set tag rides as the 4th token segment; it never touches the Flow
         # artefact, the hash or the send data, so no republish and no recipient data in the artefact.
         flow_token = f"{flow_token}:{notification.form_tag}"
+    await await_previous_delivery(sent)
     sent.append(
         await send_flow(
             phone_number_id=phone_number_id,

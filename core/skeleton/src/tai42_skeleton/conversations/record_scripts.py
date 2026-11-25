@@ -36,6 +36,9 @@ _ROUTE_THREADS_KEY = f"KEYS[{4 + len(_INDEXED_STATUSES)}]"
 _ROUTE_ROW_KEY = f"KEYS[{5 + len(_INDEXED_STATUSES)}]"
 _DELETE_THREAD_INDEX_KEY = f"KEYS[{2 + len(_INDEXED_STATUSES)}]"
 _DELETE_ROUTE_THREADS_KEY = f"KEYS[{3 + len(_INDEXED_STATUSES)}]"
+# A provider's receipt names its provider id's receipt flag behind the target index; a grace
+# confirmation names none.
+_RECEIPT_FLAG_KEY = f"KEYS[{3 + len(_INDEXED_STATUSES)}]"
 
 # A live record's index member outlives nothing; a terminal one expires with its row.
 _NO_EXPIRY_SCORE = "+inf"
@@ -466,8 +469,12 @@ return 1
 # (the send is still in flight — the target is staged on ``pending_receipt`` and applied by the
 # completing ``provisional`` write), 0 idempotent (already in the target state, or re-parked to
 # the same target), -1 gone, -2 conflicting terminal (a real terminal, or a different target
-# already parked — first parked wins), -3 a state that never sent an answer. ARGV =
-# target_status, now, ttl_ms, message_id, index_score.
+# already parked — first parked wins), -3 a state that never sent an answer. While the send is in
+# flight the reported id's receipt flag is kept for ``ttl_ms``, whatever the record's verdict: the
+# send that holds for that message may be resumed by another worker until the record leaves
+# ``pending_delivery``. KEYS = the shared layout's record, status indexes and target index, then the
+# receipt flag key (absent for a grace confirmation). ARGV = target_status, now, ttl_ms, message_id,
+# index_score.
 _RECEIPT_LUA = f"""
 -- conversations:record:receipt
 {_OWNED_LIB}
@@ -477,6 +484,7 @@ local target = ARGV[1]
 if status == target then return 0 end
 if status == 'delivered' or status == 'failed' or status == 'shed' then return -2 end
 if status == 'pending_delivery' then
+  if {_RECEIPT_FLAG_KEY} then redis.call('PEXPIRE', {_RECEIPT_FLAG_KEY}, ARGV[3]) end
   local parked = redis.call('HGET', KEYS[1], 'pending_receipt')
   if parked == target then return 0 end
   if parked and parked ~= '' then return -2 end
@@ -524,12 +532,27 @@ return 1
 
 # Delete a record row with everything that names it: the keys its ``owned_keys`` names (each ref
 # list and in-flight set loses the record, each keyspace-3 key and the ask key that still hold the
-# record's id are deleted) and its status-index member. Shared by the delete and the send placement
-# step, so one cleanup serves every path that removes a row on request. The writer the record
-# stamped stays a writer of its thread until the thread is cleared. Returns the keys removed.
+# record's id are deleted), the receipt flag of every provider id it indexed in keyspace 3 that no
+# other record holds now, and its status-index member. ``flag_prefixes`` is the decoded
+# ``ConversationsKeyspace.receipt_flag_prefixes``: a flag key is the keyspace-3 key with its prefix
+# swapped. Shared by the delete and the send placement step, so one cleanup serves every path that
+# removes a row on request. The writer the record stamped stays a writer of its thread until the
+# thread is cleared. Returns the keys removed.
 _DELETE_ROW_LIB = f"""
 {_OWNED_LIB}
-local function delete_row(rk, mid)
+local function forget_receipt_flags(rk, mid, flag_prefixes)
+  local outbound = flag_prefixes.outbound
+  for _, name in ipairs(owned_names(rk)) do
+    if string.sub(name, 1, #outbound) == outbound then
+      local holder = redis.call('GET', name)
+      if not holder or holder == mid then
+        redis.call('DEL', flag_prefixes.receipt .. string.sub(name, #outbound + 1))
+      end
+    end
+  end
+end
+local function delete_row(rk, mid, flag_prefixes)
+  forget_receipt_flags(rk, mid, flag_prefixes)
   forget_owned(rk, mid)
   local removed = redis.call('DEL', rk)
   for i = 2, {1 + len(_INDEXED_STATUSES)} do redis.call('ZREM', KEYS[i], mid) end
@@ -540,11 +563,12 @@ end
 # Delete a record and its index membership in ONE step, so no listing can name a row that
 # is gone. The record's refs, keyspace-3 entries and ask entry go with it (``_DELETE_ROW_LIB``).
 # The thread leaves the route index with its LAST record, never before: the other records of a
-# thread outlive any one of them. Returns the number of keys removed. ARGV = message_id, thread_id.
+# thread outlive any one of them. Returns the number of keys removed. ARGV = message_id, thread_id,
+# receipt_flag_prefixes.
 _DELETE_LUA = f"""
 -- conversations:record:delete
 {_DELETE_ROW_LIB}
-local removed = delete_row(KEYS[1], ARGV[1])
+local removed = delete_row(KEYS[1], ARGV[1], cjson.decode(ARGV[3]))
 redis.call('ZREM', {_DELETE_THREAD_INDEX_KEY}, ARGV[1])
 if redis.call('ZCARD', {_DELETE_THREAD_INDEX_KEY}) == 0 then
   redis.call('ZREM', {_DELETE_ROUTE_THREADS_KEY}, ARGV[2])

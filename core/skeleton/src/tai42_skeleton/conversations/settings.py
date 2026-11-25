@@ -111,9 +111,18 @@ class ConversationsSettings(TaiBaseSettings):
     # refreshes it as it progresses; only on expiry may the sweep reclaim the record.
     delivery_claim_lease_seconds: int = Field(default=120, gt=0)
 
-    # Seconds bounding ONE outbound channel send. Must stay under the lease, or a send can
-    # outlive the claim covering it and a second worker sends the same chunk.
+    # Seconds of the MEDIUM'S time bounding one outbound channel send. A hold the platform makes
+    # inside the send (the receipt wait between the messages of one notification) stops this clock
+    # and refreshes the claim or record covering the send. With the receipt wait it must stay under
+    # the lease: between two refreshes of that cover at most one hold and this bound can elapse.
     delivery_send_timeout_seconds: float = Field(default=60, gt=0)
+
+    # Seconds the next send to a participant waits for the previous outbound's delivery receipt on a
+    # channel that confirms delivery by receipt. Elapsed: the send goes out and a WARNING names the receipt.
+    delivery_receipt_wait_seconds: float = Field(default=3, gt=0)
+
+    # Seconds between two reads of the receipt flags while a send waits.
+    delivery_receipt_poll_seconds: float = Field(default=0.1, gt=0)
 
     # Seconds bounding ONE api-door callback POST. Must stay under the lease, or a POST can
     # outlive the claim covering it and a second worker re-POSTs the same signed callback.
@@ -224,15 +233,31 @@ class ConversationsSettings(TaiBaseSettings):
 
     @model_validator(mode="after")
     def _send_timeout_stays_under_the_delivery_lease(self) -> "ConversationsSettings":
-        """Refuse a send timeout at or above the delivery lease.
+        """Refuse a send timeout plus receipt wait at or above the delivery lease.
 
-        A chunk could then still be in flight after the sweep re-claimed the record, and both workers
-        would send it.
+        Between two refreshes of the claim covering a send — the claim before a chunk, and every
+        receipt hold inside it — at most one hold and the medium's bound can elapse; past the lease a
+        second worker could claim the record and send the same chunk.
         """
-        if self.delivery_send_timeout_seconds >= self.delivery_claim_lease_seconds:
+        if self.delivery_send_timeout_seconds + self.delivery_receipt_wait_seconds >= self.delivery_claim_lease_seconds:
             raise ValueError(
-                f"CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS ({self.delivery_send_timeout_seconds}) must be below "
+                f"CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS ({self.delivery_send_timeout_seconds}) plus "
+                f"CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS ({self.delivery_receipt_wait_seconds}) must be below "
                 f"CONVERSATIONS_DELIVERY_CLAIM_LEASE_SECONDS ({self.delivery_claim_lease_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _receipt_poll_stays_under_the_receipt_wait(self) -> "ConversationsSettings":
+        """Refuse a receipt poll at or above the receipt wait.
+
+        With such a poll a hold re-reads the flags only at its deadline, so an early receipt cannot release the send
+        early.
+        """
+        if self.delivery_receipt_poll_seconds >= self.delivery_receipt_wait_seconds:
+            raise ValueError(
+                f"CONVERSATIONS_DELIVERY_RECEIPT_POLL_SECONDS ({self.delivery_receipt_poll_seconds}) must be below "
+                f"CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS ({self.delivery_receipt_wait_seconds})"
             )
         return self
 

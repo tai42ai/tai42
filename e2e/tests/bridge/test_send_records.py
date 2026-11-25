@@ -359,6 +359,8 @@ async def test_a_whatsapp_status_for_a_send_settles_its_record(
 ) -> None:
     notice = uniq("sr-wa")
     wa_id = f"1650{uuid.uuid4().int % 10**9:09d}"
+    # The test posts this send's status itself, after reading the record still provisional.
+    bridge.fake_whatsapp.receipts.withhold(notice)
     async with _default_route(bridge, uniq, channel="whatsapp") as route_name:
         await _call_tool(bridge, "notify_user", {"message": notice, "channel": "whatsapp", "recipient": wa_id})
         sent = await wait_whatsapp_send(bridge.fake_whatsapp, notice)

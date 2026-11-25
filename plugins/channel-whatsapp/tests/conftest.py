@@ -176,6 +176,19 @@ class _StubConversations:
         # already-terminal record is a benign acked no-op — so a door test asserts the parked
         # receipt through the record the door never touches directly.
         self.records: dict[str, SimpleNamespace] = {}
+        # Every ``await_delivery`` call is kept on ``await_delivery_calls`` as ``(channel,
+        # provider_message_id)`` and lands as ``("await_delivery", provider_message_id)`` on ``events``;
+        # the ``fake_httpx`` fixture shares its own log here so a test asserts the hold sits between two
+        # sends. ``await_delivery_error`` raises in place of a FAILED receipt.
+        self.await_delivery_calls: list[tuple[str, str]] = []
+        self.events: list[tuple[str, str]] = []
+        self.await_delivery_error: Exception | None = None
+
+    async def await_delivery(self, channel: str, provider_message_id: str) -> None:
+        self.await_delivery_calls.append((channel, provider_message_id))
+        self.events.append(("await_delivery", provider_message_id))
+        if self.await_delivery_error is not None:
+            raise self.await_delivery_error
 
     async def accept(
         self,
@@ -649,6 +662,7 @@ def no_whatsapp_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def fake_httpx(stub_app: _StubApp) -> FakeHttpx:
     fake = FakeHttpx()
     stub_app.clients.by_class[HttpxClient] = fake
+    stub_app.conversations.events = fake.events
     return fake
 
 

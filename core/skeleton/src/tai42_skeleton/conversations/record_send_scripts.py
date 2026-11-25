@@ -34,9 +34,17 @@ _SEND_PERSON_BASE = 7 + len(_INDEXED_STATUSES)
 
 # Open a send script's locals: the record, its id, the thread the script places the row in, the
 # row's ``created_at`` and route, the door its landing stamps ('' for a person thread), the decoded
-# writer prefixes, the optional person group, and the first key slot behind them.
+# writer prefixes, the decoded receipt flag prefixes a deleted row's flags are found by, the
+# optional person group, and the first key slot behind them.
 def _send_locals(
-    mid: str, thread: str, created: str, route: str, person_flag: str, landing_door: str, prefixes: str
+    mid: str,
+    thread: str,
+    created: str,
+    route: str,
+    person_flag: str,
+    landing_door: str,
+    prefixes: str,
+    flag_prefixes: str,
 ) -> str:
     return f"""
 local rk = KEYS[1]
@@ -46,6 +54,7 @@ local created = {created}
 local route_name = {route}
 local landing_door = {landing_door}
 W = cjson.decode({prefixes})
+local flag_prefixes = cjson.decode({flag_prefixes})
 local person_row, person_mark, person_routes
 local after = {_SEND_PERSON_BASE}
 if {person_flag} ~= '' then
@@ -68,13 +77,13 @@ local forgotten = redis.call('HGET', rk, 'forgotten_threads')
 if forgotten and forgotten ~= '' then
   for _, thread in ipairs(cjson.decode(forgotten)) do
     if thread == place_thread then
-      delete_row(rk, mid)
+      delete_row(rk, mid, flag_prefixes)
       return {-1, 'forgotten'}
     end
   end
 end
 if person_row and (redis.call('EXISTS', person_row) == 0 or redis.call('EXISTS', person_mark) == 1) then
-  delete_row(rk, mid)
+  delete_row(rk, mid, flag_prefixes)
   return {-1, 'person_closed'}
 end
 """
@@ -135,12 +144,12 @@ return 1
 # placement checks' answer. KEYS = the send layout, then ``n_k3`` keyspace-3 keys, then the ref
 # keys. ARGV holds content_json, sends_json, attempts, now, message_id, provisional_score,
 # delivered_score, grace_deadline, ttl_ms, thread_id, created_at, route_name, person_flag, n_k3,
-# the landing door ('' for a person thread) and writer_prefixes.
+# the landing door ('' for a person thread), writer_prefixes and receipt_flag_prefixes.
 _COMPLETE_SEND_LUA = f"""
 -- conversations:record:complete_send
 {_DELETE_ROW_LIB}
 {_WRITER_LIB}
-{_send_locals("ARGV[5]", "ARGV[10]", "ARGV[11]", "ARGV[12]", "ARGV[13]", "ARGV[15]", "ARGV[16]")}
+{_send_locals("ARGV[5]", "ARGV[10]", "ARGV[11]", "ARGV[12]", "ARGV[13]", "ARGV[15]", "ARGV[16]", "ARGV[17]")}
 {_SEND_PLACEMENT_CHECKS}
 local final = 'provisional'
 local reply = redis.call('HGET', rk, '{_F_ASK_REPLY}')
@@ -171,13 +180,14 @@ return {{placed, final}}
 # whose process stopped; the landing stamps the begin's ``writer_door``. Answers
 # ``{1 | 0, <the status written>}`` or the placement checks' answer. KEYS = the send layout.
 # Its ARGV, in order: content_with_error, content_without_error, status, now, message_id,
-# terminal_score, ttl_ms, thread_id, created_at, route_name, person_flag, writer_prefixes.
+# terminal_score, ttl_ms, thread_id, created_at, route_name, person_flag, writer_prefixes,
+# receipt_flag_prefixes.
 _END_SEND_WRITER_DOOR = "redis.call('HGET', KEYS[1], 'writer_door') or ''"
 _END_SEND_LUA = f"""
 -- conversations:record:end_send
 {_DELETE_ROW_LIB}
 {_WRITER_LIB}
-{_send_locals("ARGV[5]", "ARGV[8]", "ARGV[9]", "ARGV[10]", "ARGV[11]", _END_SEND_WRITER_DOOR, "ARGV[12]")}
+{_send_locals("ARGV[5]", "ARGV[8]", "ARGV[9]", "ARGV[10]", "ARGV[11]", _END_SEND_WRITER_DOOR, "ARGV[12]", "ARGV[13]")}
 {_SEND_PLACEMENT_CHECKS}
 local final, content = ARGV[3], ARGV[1]
 local reply = redis.call('HGET', rk, '{_F_ASK_REPLY}')
@@ -197,17 +207,20 @@ return {{placed, final}}
 """
 
 # Write a bridge reply chunk's keyspace-3 keys and message refs on its row, idempotently per
-# (key, record), so the resume's re-index of a chunk already indexed changes nothing. A gone row
-# (its thread was forgotten while the reply was being delivered) gets no key: -1; otherwise 1.
-# KEYS = record key, then ``n_k3`` keyspace-3 keys, then the ref keys. ARGV = message_id, ttl_ms,
-# n_k3.
+# (key, record), so the resume's re-index of a chunk already indexed changes nothing. A receipt
+# flag an id's receipt set before the id was indexed is kept for ``ttl_ms``, as the receipt
+# script keeps one landing after it: the reply is still being sent; an id without a flag gets
+# none. A gone row (its thread was forgotten while the reply was being delivered) gets no key: -1;
+# otherwise 1. KEYS = record key, then ``n_k3`` keyspace-3 keys, then as many ref keys, then as
+# many receipt flag keys. ARGV = message_id, ttl_ms, n_k3.
 _INDEX_OUTBOUND_LUA = f"""
 -- conversations:record:index_outbound
 {_OWNED_LIB}
 if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
 local n_k3 = tonumber(ARGV[3])
 for i = 2, 1 + n_k3 do own_value(KEYS[1], KEYS[i], ARGV[1], ARGV[2]) end
-for i = 2 + n_k3, #KEYS do own_ref(KEYS[1], KEYS[i], ARGV[1], ARGV[2]) end
+for i = 2 + n_k3, 1 + 2 * n_k3 do own_ref(KEYS[1], KEYS[i], ARGV[1], ARGV[2]) end
+for i = 2 + 2 * n_k3, #KEYS do redis.call('PEXPIRE', KEYS[i], ARGV[2]) end
 return 1
 """
 

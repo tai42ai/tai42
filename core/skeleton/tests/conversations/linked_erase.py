@@ -228,6 +228,7 @@ class World:
 
         await recorded_send(
             channel="twilio",
+            channel_obj=self.channel,  # pyright: ignore[reportArgumentType]
             address=ChannelAddress(our_identity=our_identity, address=address),
             parts=[AnswerPart(message="proceed?")],
             sent_by="ask",
@@ -252,6 +253,7 @@ class World:
         task = asyncio.ensure_future(
             recorded_send(
                 channel="twilio",
+                channel_obj=self.channel,  # pyright: ignore[reportArgumentType]
                 address=ChannelAddress(our_identity=our_identity, address=address),
                 parts=[AnswerPart(message="hello")],
                 sent_by="notify",

@@ -171,10 +171,10 @@ async def _ledgered_sends(message_id: str, door: str) -> list[SentMessage]:
 async def _confirm_after_grace(message_id: str, grace_seconds: float) -> None:
     """Confirm a still-``provisional`` record ``delivered`` once its grace window elapses.
 
-    The atomic ingest is a no-op on a record a receipt already made terminal.
+    The atomic confirmation is a no-op on a record a receipt already made terminal.
     """
     await asyncio.sleep(grace_seconds)
-    await get_conversations_manager().records.ingest_receipt(message_id, DeliveryReceipt.DELIVERED, time.time())
+    await get_conversations_manager().records.confirm_after_grace(message_id, time.time())
 
 
 # -- out-of-band receipt sink ------------------------------------------------
@@ -193,15 +193,22 @@ async def record_delivery_status(
 
     A receipt for a ``notify_user`` send record also reaches that send's trace, as the
     ``delivery_receipt`` event carrying ``errors`` (the provider's error detail).
+
+    First of all the receipt is flagged by its channel and id, before anything resolves the id, so
+    a send holding for this message's delivery is released on any process even when the id is not
+    yet indexed or names no record. A receipt landing while the record's send is in flight keeps its
+    flag for the answer retention, so a worker that resumes the send after the delivery claim lapsed
+    reads it as the uninterrupted send would.
     """
     store = get_conversations_manager().records
+    await store.signal_receipt(channel, provider_message_id, status, errors)
     message_id = await store.resolve_outbound(channel, provider_message_id)
     if message_id is None:
         raise LookupError(
             f"conversations: delivery receipt names outbound id {provider_message_id!r} on channel {channel!r} "
             "that maps to no answer record"
         )
-    outcome = await store.ingest_receipt(message_id, status, time.time())
+    outcome = await store.ingest_receipt(message_id, channel, provider_message_id, status, time.time())
     if outcome == -1:
         raise LookupError(
             f"conversations: outbound id {provider_message_id!r} resolved to record {message_id} which no longer exists"
@@ -225,7 +232,8 @@ async def record_delivery_status(
     if outcome == -2:
         logger.error(
             "conversations: delivery receipt %s for record %s conflicts with the record's settled outcome — an "
-            "already-terminal state, or a different receipt already parked on the still-sending record; ignored",
+            "already-terminal state, or a different receipt already parked on the still-sending record; the "
+            "record's outcome stands, and the message's own receipt is kept for the send that holds for it",
             status.value,
             message_id,
         )
@@ -268,7 +276,7 @@ async def redrive_pending() -> None:
             _spawn(deliver(work.message_id))
         elif work.delivery_status is DeliveryStatus.PROVISIONAL:
             if work.grace_deadline is not None and now >= work.grace_deadline:
-                await store.ingest_receipt(work.message_id, DeliveryReceipt.DELIVERED, now)
+                await store.confirm_after_grace(work.message_id, now)
             elif work.grace_deadline is not None:
                 _spawn(_confirm_after_grace(work.message_id, work.grace_deadline - now))
             else:
@@ -295,7 +303,7 @@ async def sweep_stalled_deliveries() -> None:
             and work.grace_deadline is not None
             and now >= work.grace_deadline
         ):
-            await store.ingest_receipt(work.message_id, DeliveryReceipt.DELIVERED, now)
+            await store.confirm_after_grace(work.message_id, now)
 
 
 async def _settle_stranded_sends(store: ConversationRecordStore) -> None:

@@ -243,6 +243,7 @@ async def _send_with_telemetry(
 
     outcome = await recorded_send(
         channel=channel,
+        channel_obj=channel_obj,
         address=address,
         parts=[notification_part(notification)],
         sent_by="notify",

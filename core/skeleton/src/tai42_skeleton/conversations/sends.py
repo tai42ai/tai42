@@ -14,7 +14,6 @@ deployment with no conversations store, is outside any conversation and goes out
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -22,10 +21,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from tai42_contract.channels import ChannelAddress, ChannelDeliveryError, ChannelNotification, SendOutcome
+from tai42_contract.channels import Channel, ChannelAddress, ChannelDeliveryError, ChannelNotification, SendOutcome
 from tai42_contract.conversations import AnswerPart, current_conversation_turn
 from tai42_contract.monitoring import MonitoringLevel
 
+from tai42_skeleton.channels.registry import resolve_channel
 from tai42_skeleton.conversations import cache
 from tai42_skeleton.conversations.address import canonical_address
 from tai42_skeleton.conversations.models import (
@@ -35,7 +35,9 @@ from tai42_skeleton.conversations.models import (
     SentBy,
     SentMessage,
 )
+from tai42_skeleton.conversations.outbound_order import ordered_send
 from tai42_skeleton.conversations.record_send import SendEndStatus, SendPlacement, send_placement_warning
+from tai42_skeleton.conversations.send_scope import send_scope
 from tai42_skeleton.conversations.settings import conversations_settings
 from tai42_skeleton.monitoring import get_monitoring
 
@@ -294,6 +296,7 @@ def _check_ask(ask: AskSend | None, attempts: SendAttempts | None) -> None:
 async def recorded_send(
     *,
     channel: str,
+    channel_obj: Channel,
     address: ChannelAddress,
     parts: list[AnswerPart],
     sent_by: SentBy,
@@ -304,17 +307,23 @@ async def recorded_send(
 ) -> SendOutcome | None:
     """Record ``send`` as a send record, record first, and return what it returned.
 
+    ``channel_obj`` is the channel named ``channel``, as the caller resolved it.
     ``address`` is the channel's pre-send address (``Channel.resolve_address``); it places a send
     that reports no outcome. ``bound`` is the send's bound: the recorder holds a recorded single
     send to it, and the settle deadline is the begin time plus ``bound`` plus the delivery claim lease.
-    A single send past ``bound`` ends ``outcome_unknown`` and raises a non-retryable
-    :class:`ChannelDeliveryError`, so no caller retry sends it twice.
+    A receipt hold inside a single send does not count against ``bound`` and moves the settle
+    deadline to the same distance from its end. A single send past ``bound`` ends
+    ``outcome_unknown`` and raises a non-retryable :class:`ChannelDeliveryError`, so no caller retry
+    sends it twice.
 
     An ask passes its :class:`AskSend` and the :class:`SendAttempts` its retry loop reports to;
     ``send`` is that whole loop, which bounds each attempt itself and returns ``None`` when the
     question was answered or gone before an attempt succeeded. Its record ends by its attempts.
 
     A send with no route, or with no conversations store, goes out unrecorded and unbounded.
+    With a store, a send on a channel that confirms delivery by receipt first holds for the
+    participant's previous outbound message (:func:`~tai42_skeleton.conversations.outbound_order.ordered_send`),
+    recorded or not; an ask holds once, before its first attempt.
     Raises what the send raised, unchanged; a failure to write the ``sending`` record raises
     before anything is sent.
     """
@@ -322,6 +331,41 @@ async def recorded_send(
     if conversations_settings().in_memory:
         logger.debug("conversations: no conversations store; %s send on %r goes out unrecorded", sent_by, channel)
         return await send()
+    store = cache.get_conversations_manager().records
+    return await ordered_send(
+        store,
+        channel_obj,
+        channel_name=channel,
+        our_identity=canonical_address(address.our_identity),
+        client_address=canonical_address(address.address),
+        own_previous=None,
+        send=lambda: _record_and_send(
+            store,
+            channel=channel,
+            address=address,
+            parts=parts,
+            sent_by=sent_by,
+            send=send,
+            bound=bound,
+            ask=ask,
+            attempts=attempts,
+        ),
+    )
+
+
+async def _record_and_send(
+    store: ConversationRecordStore,
+    *,
+    channel: str,
+    address: ChannelAddress,
+    parts: list[AnswerPart],
+    sent_by: SentBy,
+    send: Callable[[], Awaitable[SendOutcome | None]],
+    bound: float,
+    ask: AskSend | None,
+    attempts: SendAttempts | None,
+) -> SendOutcome | None:
+    """Write the send record, run ``send`` under it and complete the record; with no route, send unrecorded."""
     route = await _route_for(channel, address.our_identity)
     if route is None:
         logger.debug(
@@ -331,7 +375,6 @@ async def recorded_send(
             sent_by,
         )
         return await send()
-    store = cache.get_conversations_manager().records
     placement = await _attribute(store, route, address.address)
     begun = _begin_record(placement, channel=channel, parts=parts, sent_by=sent_by, ask=ask)
     settle_deadline = begun.created_at + bound + store.settings.delivery_claim_lease_seconds
@@ -348,8 +391,17 @@ async def _run_single(
     send: Callable[[], Awaitable[SendOutcome | None]],
     bound: float,
 ) -> SendOutcome:
+    async def _keep_settle() -> None:
+        deadline = time.time() + bound + store.settings.delivery_claim_lease_seconds
+        if not await store.extend_settle_deadline(begun.message_id, deadline):
+            logger.warning(
+                "conversations: %s: the send record was no longer sending when its settle deadline was extended "
+                "during the send",
+                _who(begun),
+            )
+
     try:
-        async with asyncio.timeout(bound) as scope:
+        async with send_scope(bound, _keep_settle) as scope:
             outcome = await send()
     except TimeoutError as exc:
         if not scope.expired():
@@ -456,6 +508,7 @@ async def send_recorded(
     """
     outcome = await recorded_send(
         channel=channel,
+        channel_obj=resolve_channel(channel),
         address=ChannelAddress(our_identity=our_identity, address=client_address),
         parts=[content],
         sent_by="channel",

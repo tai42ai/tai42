@@ -10,30 +10,29 @@ from tai42_contract.conversations import DeliveryReceipt
 
 logger = logging.getLogger(__name__)
 
-# WhatsApp delivery status → the terminal receipt to record. "read" is
-# informational (ignored); any other status (e.g. a future one) is a no-op.
+# WhatsApp delivery status → the terminal receipt to record. Any other status ("sent", a future
+# one) is a no-op.
 _DELIVERY_RECEIPTS = {
     "failed": DeliveryReceipt.FAILED,
-    "sent": DeliveryReceipt.DELIVERED,
     "delivered": DeliveryReceipt.DELIVERED,
+    "read": DeliveryReceipt.DELIVERED,
 }
 
 
 async def handle_status(status: dict[str, Any]) -> None:
     """Record one delivery status against its outbound message.
 
-    ``failed`` → FAILED (loud); ``sent``/``delivered`` → DELIVERED; ``read`` is
-    informational (debug-ignored). A status for a ``wamid`` the bridge does not
-    track (``record_delivery_status`` raises ``LookupError``) is acked, never a
-    5xx — the provider must not retry a message we do not own.
+    ``failed`` → FAILED (loud). ``delivered`` → DELIVERED: Meta delivered the message to the
+    WhatsApp user's device. ``read`` → DELIVERED too: a message is read only once delivered, and
+    Meta sends no ``delivered`` status for a message read at once. ``sent`` (Meta's servers took
+    the message, not the device) is debug-ignored like any other status. A status for a
+    ``wamid`` the bridge does not track (``record_delivery_status`` raises ``LookupError``) is
+    acked, never a 5xx — the provider must not retry a message we do not own.
     """
     wamid = status.get("id")
     state = status.get("status")
     if not isinstance(wamid, str) or not wamid or not isinstance(state, str) or not state:
         logger.warning("whatsapp status entry missing string id/status; skipping: %r", status)
-        return
-    if state == "read":
-        logger.debug("whatsapp read receipt for %s ignored", wamid)
         return
     receipt = _DELIVERY_RECEIPTS.get(state)
     if receipt is None:

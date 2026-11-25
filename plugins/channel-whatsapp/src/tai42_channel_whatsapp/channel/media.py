@@ -8,6 +8,7 @@ from __future__ import annotations
 from tai42_contract.channels import ChannelDeliveryError
 from tai42_contract.interactions.models import MediaItem, MediaKind
 
+from tai42_channel_whatsapp.channel.send_order import await_previous_delivery
 from tai42_channel_whatsapp.client import (
     SentMessage,
     send_audio,
@@ -60,7 +61,8 @@ async def send_file_media(
 ) -> list[SentMessage]:
     """Send each file-media item (image/document/video/audio) as its own native message.
 
-    Extends ``sent`` with each accepted message in order and returns it.
+    Extends ``sent`` with each accepted message in order and returns it; each item is sent once
+    the medium reports the message before it delivered.
 
     Each item is its own message, so there is no native per-send cap here — the platform
     guard bounds the item count. A part that fails mid-send raises naming the wamids already
@@ -68,6 +70,7 @@ async def send_file_media(
     """
     for item in files:
         try:
+            await await_previous_delivery(sent)
             sent.append(await send_one_file(phone_number_id, target, item))
         except ChannelDeliveryError as exc:
             raise ChannelDeliveryError(

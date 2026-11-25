@@ -75,6 +75,7 @@ _DELIVERY_RECEIPTS = {
     "failed": DeliveryReceipt.FAILED,
     "undelivered": DeliveryReceipt.FAILED,
     "delivered": DeliveryReceipt.DELIVERED,
+    "read": DeliveryReceipt.DELIVERED,
 }
 
 
@@ -513,8 +514,9 @@ async def _reject_media_item(
 async def twilio_status(request: Request) -> Response:
     """Ingest a Twilio-signed delivery-status callback for a bridge outbound message.
 
-    ``failed``/``undelivered`` → record FAILED; ``delivered`` → DELIVERED; every
-    intermediate status (queued/sent/sending/...) is a benign no-op. A status for a
+    ``failed``/``undelivered`` → record FAILED; ``delivered`` → DELIVERED; ``read`` (the
+    recipient opened the message, so it was delivered) → DELIVERED; every intermediate
+    status (queued/sent/sending/...) is a benign no-op. A status for a
     ``MessageSid`` the bridge does not track is acked, never a 5xx — the provider
     must not retry a message we do not own.
     """

@@ -223,6 +223,9 @@ class TwilioChannel:
     # The SMS segment ceiling this channel splits a long answer against; the
     # conversation-delivery machine reads it (an operator may override it per deployment).
     max_message_chars: ClassVar[int] = 1600
+    # A send returns once Twilio queued the message; its delivery arrives later on the status
+    # webhook, which records it through record_delivery_status.
+    confirms_delivery_by_receipt: ClassVar[bool] = True
     # The address a conversation route on this channel names as its ``our_identity``.
     identity_hint: ClassVar[str] = (
         "The Twilio number clients text, as +15550001111; for a WhatsApp sender write it as whatsapp:+15550001111."

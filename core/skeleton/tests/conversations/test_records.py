@@ -539,19 +539,19 @@ async def test_channel_provisional_then_receipt_delivered(monkeypatch):
     assert got.delivery_status is DeliveryStatus.PROVISIONAL
     assert sent_ids(got) == ["out-1"]
     # A positive receipt confirms it delivered.
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, time.time()) == 1
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, time.time()) == 1
     got = await store.get_record("m1")
     assert got is not None
     assert got.delivery_status is DeliveryStatus.DELIVERED
     # A repeat receipt is idempotent.
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, time.time()) == 0
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, time.time()) == 0
 
 
 async def test_receipt_failed_marks_failed(monkeypatch):
     store = _store(monkeypatch, FakeRecordRedis())
     await create_record(store, _record())
     await store.mark_provisional("m1", sent("out-1"), 1, time.time(), "tok")
-    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, time.time()) == 1
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.FAILED, time.time()) == 1
     got = await store.get_record("m1")
     assert got is not None
     assert got.delivery_status is DeliveryStatus.FAILED
@@ -562,7 +562,7 @@ async def test_receipt_conflicts_with_opposite_terminal(monkeypatch):
     await create_record(store, _record())
     await store.mark_delivered("m1", [], 1, time.time(), "tok")
     # A late FAILED receipt on an already-delivered record is a conflict, not an override.
-    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, time.time()) == -2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.FAILED, time.time()) == -2
 
 
 async def test_mark_delivered_idempotent_and_failed_guard(monkeypatch):

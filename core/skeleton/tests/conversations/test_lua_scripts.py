@@ -374,7 +374,7 @@ async def test_a_settled_record_holds_no_lease_and_no_stale_grace_deadline(store
         assert await store.mark_provisional("m1", sent("out-1"), 1, now, "worker-1") == 1
 
     if settle == "receipt":
-        assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 1
+        assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 1
 
     assert await lua_redis.hget(_key("m1"), "claim") == ""
     if settle != "provisional":
@@ -421,18 +421,18 @@ async def test_a_receipt_confirms_a_provisional_record_once(store, lua_redis):
     now = time.time()
     await store.mark_provisional("m1", sent("out-1"), 1, now, "tok")
 
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 1
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 1
     assert (await store.get_record("m1")).delivery_status is DeliveryStatus.DELIVERED
     # The grace-expiry fallback arriving after a receipt is a no-op, not a second write.
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 0
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 0
     # A failure receipt for a record already confirmed delivered is the conflict the
     # caller logs, never a silent overwrite.
-    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, now) == -2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.FAILED, now) == -2
     assert 0 < await lua_redis.ttl(_key("m1")) <= ConversationsSettings().answer_retention_ttl_seconds
 
 
 async def test_a_receipt_reports_a_missing_record(store):
-    assert await store.ingest_receipt("gone", DeliveryReceipt.DELIVERED, time.time()) == -1
+    assert await store.ingest_receipt("gone", "twilio", "out-1", DeliveryReceipt.DELIVERED, time.time()) == -1
 
 
 @pytest.mark.parametrize("receipt", [DeliveryReceipt.DELIVERED, DeliveryReceipt.FAILED])
@@ -443,7 +443,7 @@ async def test_a_receipt_before_provisional_is_parked_and_acked(store, lua_redis
     await create_record(store, _record("m1"))
     now = time.time()
 
-    assert await store.ingest_receipt("m1", receipt, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", receipt, now) == 2
     record = await store.get_record("m1")
     # The send is untouched: status stays pending_delivery, the receipt only staged.
     assert record.delivery_status is DeliveryStatus.PENDING_DELIVERY
@@ -458,7 +458,7 @@ async def test_a_parked_receipt_is_applied_when_the_send_completes(store, lua_re
     straight to delivered, skipping provisional entirely."""
     await create_record(store, _record("m1"))
     now = time.time()
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 2
 
     assert await store.mark_provisional("m1", sent("out-1"), 1, now, "tok") == 2
     record = await store.get_record("m1")
@@ -472,7 +472,7 @@ async def test_a_parked_failed_receipt_drives_the_record_failed(store, lua_redis
     """A staged FAILED receipt drives the record to the failed terminal on completion."""
     await create_record(store, _record("m1"))
     now = time.time()
-    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.FAILED, now) == 2
 
     assert await store.mark_provisional("m1", sent("out-1"), 1, now, "tok") == 3
     record = await store.get_record("m1")
@@ -486,9 +486,9 @@ async def test_two_conflicting_parked_receipts_keep_the_first(store, lua_redis):
     caller logs, never an overwrite."""
     await create_record(store, _record("m1"))
     now = time.time()
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 2
 
-    assert await store.ingest_receipt("m1", DeliveryReceipt.FAILED, now) == -2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.FAILED, now) == -2
     assert (await store.get_record("m1")).pending_receipt is DeliveryStatus.DELIVERED
 
 
@@ -496,9 +496,9 @@ async def test_a_re_parked_same_receipt_is_idempotent(store, lua_redis):
     """A vendor redelivery during the window re-parks to the same target and reports it settled."""
     await create_record(store, _record("m1"))
     now = time.time()
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 2
 
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 0
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 0
     assert (await store.get_record("m1")).pending_receipt is DeliveryStatus.DELIVERED
 
 
@@ -507,7 +507,7 @@ async def test_a_sender_failure_drops_a_parked_receipt_loudly(store, lua_redis, 
     an in-flight record: the failed state stands, the drop is logged, the wrapper reports 1."""
     await create_record(store, _record("m1"))
     now = time.time()
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 2
 
     with caplog.at_level(logging.WARNING):
         assert await store.mark_failed("m1", 1, now, "tok", sends=[]) == 1
@@ -523,7 +523,7 @@ async def test_a_receipt_after_provisional_is_unchanged(store, lua_redis):
     now = time.time()
     assert await store.mark_provisional("m1", sent("out-1"), 1, now, "tok") == 1
 
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 1
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 1
     assert (await store.get_record("m1")).delivery_status is DeliveryStatus.DELIVERED
 
 
@@ -535,7 +535,7 @@ async def test_an_answerless_record_still_refuses_a_receipt(store, lua_redis, re
     await create_record(store, _record("m1", status=DeliveryStatus.ACCEPTED), intake_token="worker-1")
     now = time.time()
 
-    assert await store.ingest_receipt("m1", receipt, now) == -3
+    assert await store.ingest_receipt("m1", "twilio", "out-1", receipt, now) == -3
     assert (await store.get_record("m1")).delivery_status is DeliveryStatus.ACCEPTED
     assert await lua_redis.ttl(_key("m1")) == -1
 
@@ -603,7 +603,7 @@ async def test_every_transition_moves_the_record_to_exactly_one_status_index(sto
     assert await store.mark_provisional("m1", sent("out-1"), 1, now, "tok") == 1
     assert await _indexed_under(lua_redis, "m1") == ["provisional"]
 
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 1
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 1
     assert await _indexed_under(lua_redis, "m1") == ["delivered"]
 
 
@@ -939,7 +939,7 @@ async def test_mark_unreadable_drops_a_parked_receipt_loudly(store, lua_redis, c
     the failed terminal stands, the drop is logged at WARNING, and the wrapper remaps 2 to 1."""
     await create_record(store, _record("m1"))
     now = time.time()
-    assert await store.ingest_receipt("m1", DeliveryReceipt.DELIVERED, now) == 2
+    assert await store.ingest_receipt("m1", "twilio", "out-1", DeliveryReceipt.DELIVERED, now) == 2
 
     with caplog.at_level(logging.WARNING):
         assert await store.mark_unreadable("m1", now) == 1

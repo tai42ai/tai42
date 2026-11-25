@@ -98,6 +98,21 @@ class Channel(Protocol):
     neither (and has no override) is a loud config error at send, never a silent unbounded or
     truncated send.
 
+    A channel MAY also declare an OPTIONAL ``ClassVar confirms_delivery_by_receipt: bool`` (the
+    same documented-member convention, NOT a Protocol member, read with ``getattr(channel,
+    "confirms_delivery_by_receipt", False)``). ``True`` states what a return from ``notify`` and
+    ``deliver`` means on this medium: the message was ACCEPTED for later delivery, and the channel
+    reports that delivery through ``record_delivery_status`` (a ``DELIVERED`` or ``FAILED``
+    receipt per provider message id). The platform then holds the next send to the same
+    participant until the previous one is reported delivered, bounded by
+    ``CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS``. Absent or ``False`` means a return places the
+    message in the participant's view in send order, and sends follow one another at once. A
+    channel that returns several provider ids from one ``notify``/``deliver`` orders them itself
+    with ``tai42_app.conversations.await_delivery`` between its sends; inside a ``notify`` those
+    holds do not count against the send's bound. The sequence is keyed by the address the sender
+    gave: two sends that address one participant in two different forms are two sequences and are
+    not ordered against each other.
+
     A channel MAY also declare an OPTIONAL ``ClassVar identity_hint: str`` — one plain sentence
     telling an operator what to enter as a conversation route's ``our_identity`` on this channel
     (which address of the medium clients message). The same documented-member convention, NOT a
@@ -211,7 +226,8 @@ class Channel(Protocol):
         participant address the message went from and to, and the per-message ids the
         medium assigned this send (several when the medium splits a long message, empty
         when it exposes no id), which later correlate an out-of-band delivery receipt or a
-        quote back to this send. One send attempt only, no retry. A channel that cannot
-        notify raises :class:`NotImplementedError`.
+        quote back to this send. Order across sends to one participant is the platform's,
+        given the channel's ``confirms_delivery_by_receipt`` declaration. One send attempt
+        only, no retry. A channel that cannot notify raises :class:`NotImplementedError`.
         """
         raise NotImplementedError

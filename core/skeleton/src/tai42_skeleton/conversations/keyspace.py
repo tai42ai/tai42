@@ -2,9 +2,9 @@
 
 Every literal key string lives ONLY here. A provider-supplied id sits LAST in its key and the segment
 before it is checked ``:``-free, so no provider value can bleed across a segment boundary — the sole
-exceptions are ``message_ref_key``, ``open_code_key`` and the two redeem-throttle keys, whose variable
-part is a single opaque ``sha256`` terminal segment folding charset-unconstrained inputs into a hash,
-so they carry no qualifier guard.
+exceptions are ``message_ref_key``, ``outbound_order_key``, ``open_code_key`` and the two redeem-throttle
+keys, whose variable part is a single opaque ``sha256`` terminal segment folding charset-unconstrained
+inputs into a hash, so they carry no qualifier guard.
 
 The person keyspaces beside the person row hold its erase mark, the ids it absorbed, its thread's
 recorded routes and an absorbed id's absorbed-into pointer; each writer's threads list the route-keyed
@@ -105,6 +105,47 @@ class ConversationsKeyspace:
     def outbound_index_key_prefix(self) -> str:
         """The outbound reverse-index key prefix (the segment every :meth:`outbound_index_key` starts with)."""
         return f"{self.prefix}:outbound:"
+
+    def receipt_flag_key(self, channel: str, provider_message_id: str) -> str:
+        """Delivery-receipt flag key of one outbound provider id, channel-qualified.
+
+        Written by the receipt door before anything resolves the id, read by a send holding for that
+        message's delivery. Both halves must be non-blank.
+        """
+        _require_qualifier_segment("channel", channel)
+        _require_key_segment("provider_message_id", provider_message_id)
+        return f"{self.prefix}:receipt:{channel}:{provider_message_id}"
+
+    @property
+    def receipt_flag_key_prefix(self) -> str:
+        """The receipt flag key prefix (the segment every :meth:`receipt_flag_key` starts with)."""
+        return f"{self.prefix}:receipt:"
+
+    def receipt_flag_prefixes(self) -> str:
+        """The JSON object of key prefixes a record delete builds the receipt flag keys of its sent ids from.
+
+        A flag key and the outbound reverse-index key of one provider id share everything behind their
+        prefixes, so the delete swaps the prefix of each reverse-index key the record owns.
+        """
+        return json.dumps(
+            {"outbound": self.outbound_index_key_prefix, "receipt": self.receipt_flag_key_prefix},
+            separators=(",", ":"),
+        )
+
+    def outbound_order_key(self, channel: str, our_identity: str, client_address: str) -> str:
+        """Key of the last outbound message sent to one participant, the one the next send there holds for.
+
+        The participant conversation is the channel, our identity and the participant address; the
+        identity and address are charset-unconstrained, so the variable part is a SINGLE opaque terminal
+        segment, the sha256 of the deterministic JSON array of the three.
+        """
+        _require_key_segment("channel", channel)
+        _require_key_segment("our_identity", our_identity)
+        _require_key_segment("client_address", client_address)
+        opaque = hashlib.sha256(
+            json.dumps([channel, our_identity, client_address], separators=(",", ":")).encode()
+        ).hexdigest()
+        return f"{self.prefix}:order:{opaque}"
 
     def message_ref_key(self, channel: str, our_identity: str, client_address: str, medium_message_id: str) -> str:
         """Message-ref key: the ordered list of the record ``message_id``s that carry one medium message id.

@@ -206,17 +206,34 @@ class RecordDeliveryMixin(RecordStoreBase):
             )
         return result
 
-    async def ingest_receipt(self, message_id: str, receipt: DeliveryReceipt, now: float) -> int:
-        """Ingest an out-of-band receipt for an outbound message.
+    async def ingest_receipt(
+        self, message_id: str, channel: str, provider_message_id: str, receipt: DeliveryReceipt, now: float
+    ) -> int:
+        """Ingest an out-of-band receipt for the outbound ``provider_message_id`` on ``channel``.
 
         Returns 1 transitioned (a ``provisional`` record settled), 2 parked (the record's send is
         still in flight — the receipt is staged and applied by the completing provisional write), 0
         already in the receipt's terminal state or re-parked to the same target, -1 gone, -2 a
         conflicting terminal or a different target already parked, -3 the id resolved to a record in
-        a state that never sent an answer.
+        a state that never sent an answer. While the record's send is in flight the id's receipt flag
+        is kept for the answer retention, whatever the record's verdict: a worker that resumes the send
+        reads it.
         """
         target = DeliveryStatus.DELIVERED if receipt is DeliveryReceipt.DELIVERED else DeliveryStatus.FAILED
         keys = self._record_keys(message_id, target)
+        keys.append(self.settings.keyspace.receipt_flag_key(channel, provider_message_id))
+        return await self._apply_receipt(keys, message_id, target, now)
+
+    async def confirm_after_grace(self, message_id: str, now: float) -> int:
+        """Confirm ``message_id`` ``delivered`` because its grace window elapsed with no receipt.
+
+        The record step a ``delivered`` receipt takes, with no provider id: a record a receipt already
+        made terminal is left as it is. Returns :meth:`ingest_receipt`'s codes.
+        """
+        keys = self._record_keys(message_id, DeliveryStatus.DELIVERED)
+        return await self._apply_receipt(keys, message_id, DeliveryStatus.DELIVERED, now)
+
+    async def _apply_receipt(self, keys: list[str], message_id: str, target: DeliveryStatus, now: float) -> int:
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
                 await eval_script(
@@ -241,8 +258,9 @@ class RecordDeliveryMixin(RecordStoreBase):
 
         One script on the record's row, idempotent per (key, record), so re-indexing a chunk that
         is already indexed changes nothing. ``client_address`` is the address inbound uses for the
-        participant (the record's own). Written with the retention TTL. Returns 1 written (or
-        nothing to write), -1 the row is gone and nothing was written.
+        participant (the record's own). Written with the retention TTL; a receipt flag an id's early
+        receipt already set is kept for the retention too, since the record's send is in flight. Returns 1
+        written (or nothing to write), -1 the row is gone and nothing was written.
         """
         ids = list(dict.fromkeys(outbound_ids))
         if not ids:
@@ -250,6 +268,7 @@ class RecordDeliveryMixin(RecordStoreBase):
         keys = [self.settings.keyspace.record_key(message_id)]
         keys.extend(self.settings.keyspace.outbound_index_key(channel, pid) for pid in ids)
         keys.extend(self.settings.keyspace.message_ref_key(channel, our_identity, client_address, pid) for pid in ids)
+        keys.extend(self.settings.keyspace.receipt_flag_key(channel, pid) for pid in ids)
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             return int(
                 await eval_script(

@@ -34,7 +34,7 @@ from tai42_skeleton.channels import notify as notify_module
 from tai42_skeleton.channels.notify import notify_user
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations import sends as sends_module
-from tai42_skeleton.conversations.delivery_channel import _notify_refusal
+from tai42_skeleton.conversations.channel_refusal import notify_refusal
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.record_send import SETTLE_ERROR
 from tai42_skeleton.conversations.thread_ids import person_thread_id, route_thread_id
@@ -226,6 +226,42 @@ async def test_a_sending_row_inside_its_deadline_is_left_alone_by_both_passes(lu
     assert still.delivery_status is DeliveryStatus.SENDING
     assert [member for member, _ in await sending_ids(lua_env)] == [record.message_id]
     assert len(channel.sends) == 1
+
+
+async def test_extending_a_sending_rows_settle_deadline_keeps_it_out_of_the_settle(lua_env, channels, monkeypatch):
+    await _routed(lua_env)
+    channels(FakeChannel())
+
+    async def _stopped(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(sends_module, "_complete", _stopped)
+    await notify_user("hello", channel="twilio", recipient=_ADDRESS)
+    [record] = await send_records(lua_env)
+    await past_deadline(lua_env, record.message_id)
+    moved_to = time.time() + 60
+
+    assert await lua_env.store.extend_settle_deadline(record.message_id, moved_to) is True
+
+    assert await sending_ids(lua_env) == [(record.message_id, pytest.approx(moved_to))]
+    assert await lua_env.store.settle_due_sends() == []
+    still = await lua_env.store.get_record(record.message_id)
+    assert still is not None
+    assert still.delivery_status is DeliveryStatus.SENDING
+
+
+async def test_extending_the_settle_deadline_of_an_ended_send_record_changes_nothing(lua_env, channels):
+    await _routed(lua_env)
+    channels(FakeChannel())
+    await notify_user("hello", channel="twilio", recipient=_ADDRESS)
+    [record] = await send_records(lua_env)
+
+    assert await lua_env.store.extend_settle_deadline(record.message_id, time.time() + 60) is False
+
+    assert await sending_ids(lua_env) == []
+    ended = await lua_env.store.get_record(record.message_id)
+    assert ended is not None
+    assert ended.delivery_status is DeliveryStatus.PROVISIONAL
 
 
 async def test_deliver_on_a_sending_row_sends_nothing(lua_env, channels, monkeypatch):
@@ -505,7 +541,7 @@ async def test_a_cancelled_refusal_notice_ends_outcome_unknown_and_leaves_the_re
     channel = GatedChannel()
 
     with caplog.at_level(logging.WARNING):
-        await _cancel_in_flight(channel, lambda: _notify_refusal(lua_env.store, reply, channel))
+        await _cancel_in_flight(channel, lambda: notify_refusal(lua_env.store, reply, channel))
 
     [record] = await send_records(lua_env)
     assert record.sent_by == "notice"
@@ -529,7 +565,7 @@ def notice_sites(lua_env, monkeypatch):
     monkeypatch.setattr(inbound_rejection_module, "_emit_inbound_rejected", _no_event)
 
     async def refusal(channel):
-        await _notify_refusal(lua_env.store, await _refused_reply(lua_env), channel)
+        await notify_refusal(lua_env.store, await _refused_reply(lua_env), channel)
 
     async def participant(channel):
         monkeypatch.setattr(inbound_module, "tai42_app", _FakeApp(channel))
@@ -609,10 +645,11 @@ async def test_a_refusal_notice_whose_sending_write_fails_is_not_sent_and_logged
     assert "records redis down" in str(logged.exc_info[1])
 
 
-async def test_a_cancelled_facet_send_recorded_ends_outcome_unknown_and_propagates(lua_env, caplog):
+async def test_a_cancelled_facet_send_recorded_ends_outcome_unknown_and_propagates(lua_env, caplog, monkeypatch):
     await _routed(lua_env)
     facet = ConversationsFacet(skeleton_app)
     channel = GatedChannel()
+    monkeypatch.setattr(sends_module, "resolve_channel", lambda name: channel)
 
     async def _send() -> SendOutcome:
         return await channel.notify(SimpleNamespace(recipient=_ADDRESS, sender_identity=_IDENTITY))

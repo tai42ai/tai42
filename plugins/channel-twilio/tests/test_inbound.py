@@ -1108,8 +1108,10 @@ async def test_status_failed_records_failed(status_handler, stub_app, status: st
     ]
 
 
-async def test_status_delivered_records_delivered(status_handler, stub_app):
-    result = await status_handler(signed_request(_status_pairs("delivered"), path=_STATUS_PATH))
+@pytest.mark.parametrize("status", ["delivered", "read"])
+async def test_status_delivered_or_read_records_delivered(status_handler, stub_app, status: str):
+    # ``read``: the recipient opened the message, so it was delivered.
+    result = await status_handler(signed_request(_status_pairs(status), path=_STATUS_PATH))
 
     assert result.status_code == 204
     assert stub_app.conversations.status_calls == [

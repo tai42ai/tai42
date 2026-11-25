@@ -26,6 +26,7 @@ from tai42_channel_whatsapp.channel.interactive import INTERACTIVE_BODY_MAX_CHAR
 from tai42_channel_whatsapp.channel.media import send_media_prelude
 from tai42_channel_whatsapp.channel.notifications import send_notification
 from tai42_channel_whatsapp.channel.recipients import NO_DEFAULT_RECIPIENT, require_recipient, send_fenced_template
+from tai42_channel_whatsapp.channel.send_order import await_previous_delivery
 from tai42_channel_whatsapp.channel.template_params import parse_template_parameters
 from tai42_channel_whatsapp.client import SentMessage, mark_read_typing, send_message, send_outcome
 from tai42_channel_whatsapp.correlation import (
@@ -69,6 +70,10 @@ class WhatsAppChannel:
     # Meta caps a text message body at 4096 characters; the conversation-delivery machine splits a
     # long answer against this (an operator may override it per deployment).
     max_message_chars: ClassVar[int] = 4096
+    # A Cloud API accept is not placement: Meta keeps no order across a series of sends and reports
+    # each message's delivery on the status webhook, which records it through record_delivery_status.
+    # https://developers.facebook.com/docs/whatsapp/cloud-api/guides/send-messages
+    confirms_delivery_by_receipt: ClassVar[bool] = True
     # The address a conversation route on this channel names as its ``our_identity``.
     identity_hint: ClassVar[str] = "The number's phone_number_id from the Meta dashboard, not the display number."
 
@@ -134,11 +139,12 @@ class WhatsAppChannel:
         send. Any accompanying display ``media`` is sent FIRST — each ``image`` as
         its own image message and any ``link`` items as a text line-block, the same
         per-item send ``notify`` uses — so the question (carrying any tappable
-        widget) stays the last, actionable message; a media failure raises before
-        any reservation. A select ask renders in its native shape (buttons/list/
-        numbered text); the reservation carries the ask's options and interaction id
-        so an interactive tap resolves back to the exact option text. Returns the
-        :class:`SendOutcome` of every message sent, the media first.
+        widget) stays the last, actionable message, sent once the medium reports the
+        media delivered; a media failure raises before any reservation. A select ask
+        renders in its native shape (buttons/list/numbered text); the reservation
+        carries the ask's options and interaction id so an interactive tap resolves
+        back to the exact option text. Returns the :class:`SendOutcome` of every
+        message sent, the media first.
         """
         settings = whatsapp_settings()
         address = self.resolve_address(delivery.recipient, None)
@@ -149,6 +155,7 @@ class WhatsAppChannel:
         sent: list[SentMessage] = []
         if delivery.media:
             sent = await send_media_prelude(phone_number_id, target, list(delivery.media))
+            await await_previous_delivery(sent)
 
         if delivery.answer_format in CALLBACK_LINK_FORMATS:
             # Tier-1: answered via the callback link, so no correlation is stored.

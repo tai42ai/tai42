@@ -392,6 +392,7 @@ class RecordWriteMixin(RecordStoreBase):
                     *keys,
                     record.message_id,
                     record.thread_id,
+                    self.settings.keyspace.receipt_flag_prefixes(),
                 )
             )
 

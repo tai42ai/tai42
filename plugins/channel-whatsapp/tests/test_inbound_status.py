@@ -15,8 +15,9 @@ from .conftest import signed_request, status_payload
 pytestmark = pytest.mark.usefixtures("whatsapp_env")
 
 
-@pytest.mark.parametrize("state", ["sent", "delivered"])
-async def test_status_sent_or_delivered_records_delivered(handler, stub_app, state: str):
+@pytest.mark.parametrize("state", ["delivered", "read"])
+async def test_status_delivered_or_read_records_delivered(handler, stub_app, state: str):
+    # Meta skips the ``delivered`` webhook for a message read at once: ``read`` implies delivery.
     result = await handler(signed_request(status_payload(wamid="wamid.OUT", state=state)))
 
     assert result.status_code == 200
@@ -43,11 +44,12 @@ async def test_status_failed_records_failed_loudly_with_the_providers_errors(
     assert any("delivery failure" in record.message for record in caplog.records)
 
 
-async def test_status_read_is_ignored(handler, stub_app):
-    result = await handler(signed_request(status_payload(wamid="wamid.OUT", state="read")))
+async def test_status_sent_is_ignored(handler, stub_app):
+    # ``sent`` means Meta's servers accepted the message, not that it reached the device.
+    result = await handler(signed_request(status_payload(wamid="wamid.OUT", state="sent")))
 
     assert result.status_code == 200
-    assert stub_app.conversations.status_calls == []  # informational — nothing recorded
+    assert stub_app.conversations.status_calls == []
 
 
 async def test_status_unknown_state_is_ignored(handler, stub_app):
