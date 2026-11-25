@@ -59,7 +59,8 @@ jobs once inside the load; the first replay is about 32 jobs per child, so no ch
 replaced before the warm-up sample and that sample is the baseline for turnover.
 
 Two time bounds hold: the test's timeout marker bounds the load, and a load that does not
-finish every replay fails on it; ``MEMORY_IDLE_WAIT_S`` bounds each idle wait."""
+finish every replay fails on it; ``MEMORY_IDLE_WAIT_S`` bounds each idle wait. On a CI runner a
+replay takes about 95 s, so the whole test takes about 14 minutes; the marker allows 20."""
 
 from __future__ import annotations
 
@@ -203,7 +204,7 @@ async def _idle_wait(root_pid: int, label: str) -> list[ServeMemory]:
     return series
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(1200)
 async def test_serve_memory_stays_bounded_under_repeated_jq_load(
     memory_stack: TaiStack, uniq: Callable[[str], str]
 ) -> None:
