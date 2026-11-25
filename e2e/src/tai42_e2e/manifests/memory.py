@@ -17,11 +17,16 @@ if TYPE_CHECKING:
 # first replacement could clear it (the suite's module docstring derives both sides).
 MEMORY_WORKER_MAX_TASKS = 128
 
-# The allocator environment a container image or unit file sets for the serve's processes:
-# jemalloc preloaded by its soname, with background threads that return freed pages to the
-# kernel while a process is idle. Every process of the stack inherits it.
+# The allocator environment a container image or unit file sets for the serve's processes,
+# three variables: jemalloc preloaded by its soname (``LD_PRELOAD``), with background threads
+# that return freed pages to the kernel while a process is idle (``MALLOC_CONF``), and the
+# interpreter's own allocations routed through it (``PYTHONMALLOC``). CPython serves small
+# objects from arenas it maps outside ``malloc`` and unmaps only when wholly empty;
+# ``PYTHONMALLOC=malloc`` sends every allocation through the preloaded allocator instead.
+# Every process of the stack inherits the three.
 MEMORY_ALLOCATOR_PRELOAD = "libjemalloc.so.2"
 MEMORY_ALLOCATOR_CONF = "background_thread:true"
+MEMORY_ALLOCATOR_PYTHON = "malloc"
 
 
 def build_memory_stack(res: StackResources, variants: Variants) -> StackConfig:
@@ -30,7 +35,7 @@ def build_memory_stack(res: StackResources, variants: Variants) -> StackConfig:
     a jq program over a large document inside the serve. The compute-pool children are
     replaced after ``MEMORY_WORKER_MAX_TASKS`` jobs, so a run of a few hundred calls crosses a
     replacement in every child. Every process runs on the deployment's allocator environment
-    (``MEMORY_ALLOCATOR_PRELOAD``, ``MEMORY_ALLOCATOR_CONF``).
+    (``MEMORY_ALLOCATOR_PRELOAD``, ``MEMORY_ALLOCATOR_CONF``, ``MEMORY_ALLOCATOR_PYTHON``).
 
     Nothing the load does not exercise is loaded (no metrics route, monitoring, storage or
     builtin tools), so it does not sit in the sampled memory: the health router answers boot
@@ -59,6 +64,7 @@ def build_memory_stack(res: StackResources, variants: Variants) -> StackConfig:
     env["COMPUTE_WORKER_MAX_TASKS"] = str(MEMORY_WORKER_MAX_TASKS)
     env["LD_PRELOAD"] = MEMORY_ALLOCATOR_PRELOAD
     env["MALLOC_CONF"] = MEMORY_ALLOCATOR_CONF
+    env["PYTHONMALLOC"] = MEMORY_ALLOCATOR_PYTHON
     return StackConfig(
         name="memory",
         topology=Topology.MULTIWORKER,

@@ -1159,11 +1159,12 @@ jobs:
   # extension on the jemalloc allocator environment, runs the same 64 jq programs eight times
   # over a ~20 MiB document each, with plain document calls on executor threads beside every
   # batch, samples the serve's process tree idle before the load, between batches and idle
-  # after it, and fails when jemalloc is not mapped in the serve, when a compute-pool child
-  # reaches 300 MiB, when the idle serve ends above 1.5x its size after the first pass or still
-  # holds half or more of what the load grew it above its idle baseline, when the children
-  # were never replaced, or when a call was lost. Runs on the release-please train branch — the PR tree that gets tagged and published
-  # on merge — and on the `memory` dispatch lane; it needs the Redis and Postgres service
+  # after it, and fails when jemalloc is not mapped in the serve or PYTHONMALLOC=malloc is not
+  # in its environment, when a compute-pool child reaches 360 MiB, when the idle serve ends
+  # above 1.5x its size after the first pass or still holds half or more of what the load grew
+  # it above its idle baseline, when the children were never replaced, or when a call was lost.
+  # Runs on the release-please train branch — the PR tree that gets tagged and published on
+  # merge — and on the `memory` dispatch lane; it needs the Redis and Postgres service
   # containers below and the `libjemalloc2` package it installs, no secret and no variable.
   e2e-memory:
     needs: [reuse, changes]
@@ -1206,8 +1207,10 @@ jobs:
       - name: Sync the locked venv
         run: uv sync --locked --package tai42-e2e
       - name: Install the jemalloc allocator
-        # The memory stack's processes preload libjemalloc.so.2, as a deployment sets it; the
-        # suite fails when the library is not mapped in the serve.
+        # The memory stack's processes run on the allocator environment a deployment sets,
+        # LD_PRELOAD=libjemalloc.so.2, MALLOC_CONF=background_thread:true and
+        # PYTHONMALLOC=malloc, from the stack's manifest env; the suite fails when the library
+        # is not mapped in the serve.
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjemalloc2
       - name: Run the memory suite
         # The test's own timeout marker bounds the load, so no --timeout here; the INFO

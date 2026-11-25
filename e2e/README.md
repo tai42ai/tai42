@@ -230,11 +230,12 @@ a change to a shared root, sets `run_e2e`):
   environment, runs the same 64 jq programs eight times over a ~20 MiB document,
   with two plain document calls beside every batch so executor threads build it too,
   samples the serve's process tree idle before the load, between batches and idle
-  after it, and fails when jemalloc is not mapped in the serve, when a compute-pool
-  child reaches 300 MiB, when the idle serve ends above 1.5x its size after the first
-  pass or still holds half or more of what the load grew it above its idle baseline,
-  when the compute-pool children were never replaced, or when a call was lost. It runs on the release-please train branch (the PR tree that gets
-  tagged and published on merge) and on the `memory` lane of a manual
+  after it, and fails when jemalloc is not mapped in the serve or `PYTHONMALLOC=malloc`
+  is not in its environment, when a compute-pool child reaches 360 MiB, when the idle
+  serve ends above 1.5x its size after the first pass or still holds half or more of
+  what the load grew it above its idle baseline, when the compute-pool children were
+  never replaced, or when a call was lost. It runs on the release-please train branch
+  (the PR tree that gets tagged and published on merge) and on the `memory` lane of a manual
   `workflow_dispatch`, never on other PRs or pushes, and needs the `redis:7-alpine`
   and `postgres:16-alpine` service containers and the `libjemalloc2` package, which
   it installs.
@@ -296,10 +297,14 @@ collection like `tests/monitoring/`. It boots one stack, `memory_stack`: a
 extension over the `e2e_document` probe, the default two compute-pool children per
 worker, and `COMPUTE_WORKER_MAX_TASKS=128`, so every compute-pool child is replaced
 inside the load. Every process of the stack runs on the allocator environment a
-deployment sets, `LD_PRELOAD=libjemalloc.so.2` and `MALLOC_CONF=background_thread:true`;
-before the first sample the suite reads `/proc/<serve pid>/maps` and fails unless
-jemalloc is mapped in the serve. The suite therefore runs on Linux with the
-`libjemalloc2` package installed (`apt-get install libjemalloc2` on Debian or Ubuntu).
+deployment sets, `LD_PRELOAD=libjemalloc.so.2`, `MALLOC_CONF=background_thread:true`
+and `PYTHONMALLOC=malloc`: CPython serves small objects from arenas it maps outside
+`malloc` and unmaps only when wholly empty, and `PYTHONMALLOC=malloc` sends every
+allocation through jemalloc instead. Before the first sample the suite reads
+`/proc/<serve pid>/maps` and fails unless jemalloc is mapped in the serve, and reads
+`/proc/<serve pid>/environ` and fails unless `PYTHONMALLOC=malloc` is in it. The suite
+therefore runs on Linux with the `libjemalloc2` package installed (`apt-get install
+libjemalloc2` on Debian or Ubuntu).
 
 The load runs 64 distinct jq programs, eight times each, as chained
 `e2e_document_chain` -> jq -> `e2e_record` calls through `POST /api/run-tool`, eight at
@@ -307,8 +312,11 @@ a time, over a structured document of at least 20 MiB of JSON the serve builds i
 Beside every batch, two plain `e2e_document` calls go through the same door: it runs a
 sync tool on an executor thread of the uvicorn worker, so those threads build the
 document too, while the chained calls build it on the event loop.
-Before it starts, the suite checks the document's size and that jq receives it as an
-array, then takes the idle baseline. An idle wait samples the serve every second for
+Before it starts, the suite checks the document's size, then sends rounds of chained
+probe calls, as many at once as the stack has compute-pool children, until every
+worker's compute pool is up (a pool starts on its worker's first job), each call
+checking that jq receives the document as an array; it then takes the idle baseline
+over that complete tree. An idle wait samples the serve every second for
 30 s and its last sample is the reading: jemalloc returns memory in steps with flat
 stretches of several seconds, so a short run of equal readings does not mark the end.
 After every batch the suite reads the serve's process tree from one `ps` snapshot, and
@@ -316,7 +324,7 @@ logs it with each worker's thread count. After the last pass the same idle wait 
 the end.
 
 The budget (`tai42_e2e/memory_budget.py`): no compute-pool child in any sample at or
-above 300 MiB; the serve's idle total at the end at most 1.5x its total after the
+above 360 MiB; the serve's idle total at the end at most 1.5x its total after the
 first pass; of what the highest total sampled after the baseline rose above it, the end
 still holding less than half (a load that never rose above the baseline fails); at least
 one compute-pool child replaced after the first pass; every program recorded once per

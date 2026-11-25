@@ -8,8 +8,10 @@ from collections.abc import Sequence
 
 from tai42_e2e.rss import ServeMemory
 
-# A compute-pool child at or above this resident set (KiB) breaks the budget.
-MEMORY_CHILD_BOUND_KB = 300 * 1024
+# A compute-pool child at or above this resident set (KiB) breaks the budget: above one job's
+# peak, below a child that keeps one job's working set while running the next (the memory
+# suite's module docstring gives the measured numbers).
+MEMORY_CHILD_BOUND_KB = 360 * 1024
 # The serve's total resident set at the end of a load may be at most this multiple of its
 # total after the first pass of that load.
 MEMORY_GROWTH_FACTOR = 1.5

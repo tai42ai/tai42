@@ -39,7 +39,8 @@ count is the speed budget. The profiles:
   tai42-marketplace registry (short advisories poll, local package index).
 - `memory_stack` — opt-in, MULTIWORKER(2), no backend, no metrics process, the chain
   extension over the document probe, compute-pool children replaced every 128 jobs,
-  every process preloading jemalloc (`libjemalloc.so.2`, `MALLOC_CONF=background_thread:true`).
+  every process on jemalloc (`LD_PRELOAD=libjemalloc.so.2`, `MALLOC_CONF=background_thread:true`,
+  `PYTHONMALLOC=malloc`).
   The memory suite's home, not for reuse: its replacement setting and its load shape
   are its own.
 - `bare_stack` — the doors MOUNTED but no storage provider and no backend: the

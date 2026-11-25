@@ -1,12 +1,18 @@
 """The memory of one serve under a repeated jq load, and what it returns once idle.
 
-The stack runs on the deployment's allocator environment
-(:data:`~tai42_e2e.manifests.memory.MEMORY_ALLOCATOR_PRELOAD` with
-:data:`~tai42_e2e.manifests.memory.MEMORY_ALLOCATOR_CONF`). Before the first sample the test
-reads ``/proc/<serve pid>/maps`` and fails unless the allocator is mapped in the serve: a
-preload the dynamic loader cannot satisfy only prints a line and runs on the default
-allocator, so the run would measure the wrong thing. The suite runs where the deployment runs,
-on Linux; a host without ``/proc`` or without the library fails with that message.
+The stack runs on the deployment's allocator environment, three variables:
+:data:`~tai42_e2e.manifests.memory.MEMORY_ALLOCATOR_PRELOAD` as ``LD_PRELOAD``,
+:data:`~tai42_e2e.manifests.memory.MEMORY_ALLOCATOR_CONF` as ``MALLOC_CONF`` and
+:data:`~tai42_e2e.manifests.memory.MEMORY_ALLOCATOR_PYTHON` as ``PYTHONMALLOC``. CPython serves
+small objects from arenas it maps outside ``malloc`` and unmaps only when wholly empty, so
+memory the load frees there never returns; ``PYTHONMALLOC`` sends every allocation through the
+preloaded allocator instead. Before the first sample the test reads ``/proc/<serve pid>/maps``
+and fails unless the allocator is mapped in the serve, and reads ``/proc/<serve pid>/environ``
+and fails unless ``PYTHONMALLOC`` carries its value: a preload the dynamic loader cannot satisfy
+only prints a line and runs on the default allocator, and a dropped variable is silent, so the
+run would measure the wrong thing. The workers and compute-pool children are spawned from the
+serve's environment, so the check at the serve covers them. The suite runs where the deployment
+runs, on Linux; a host without ``/proc`` or without the library fails with that message.
 
 The load: ``MEMORY_PROGRAMS`` distinct jq programs, each run as one chained call
 ``e2e_document_chain`` -> jq (first value) -> ``e2e_record`` over a structured document of
@@ -30,9 +36,14 @@ allocates documents on those threads. The path:
 - that wrapper calls ``asyncio.to_thread(resolved_fn, **kwargs)``
   (``tai42_skeleton/tools/binding/arguments.py:30``), the loop's default executor.
 
-Before the load, once the size checks are done, an idle wait takes the baseline: the serve is
-sampled every ``MEMORY_IDLE_INTERVAL_S`` seconds for ``MEMORY_IDLE_WAIT_S`` seconds and the
-last sample is the reading. During the load the serve's process tree is sampled from one
+Before the load, once the document's size is checked, the test brings the serve's tree to its
+full shape: a compute pool starts in a uvicorn worker on that worker's first job, and the shared
+socket gives no say which worker takes a call, so each round sends as many chained probe calls
+at once as the stack has compute-pool children (workers times the kit's default pool size), then
+samples, until every worker's pool is up; at most ``MEMORY_BRING_UP_ROUNDS_PER_WORKER`` rounds per
+worker. Then an idle wait takes the baseline over the complete tree, every worker's pool up: the
+serve is sampled every ``MEMORY_IDLE_INTERVAL_S`` seconds for ``MEMORY_IDLE_WAIT_S`` seconds
+and the last sample is the reading. During the load the serve's process tree is sampled from one
 process table read after every batch. The sample after the first replay is the warm-up: every
 program compiled once in the children it reached, every cache primed, the pool idle. After
 the last replay the same idle wait gives the end. Every sample is logged with the thread count
@@ -48,9 +59,13 @@ with the whole document, so the load cannot pass by doing less work.
 
 What the load is sized to exceed: a compute-pool child parses a job's whole document, so its
 resident set after a job follows its largest input, not the sum of its inputs. The document
-is of the 20 MiB class, where one job takes a child to several hundred MB; a child whose
-allocator keeps that memory once the job is done sits above the child bound after its first
-job, long before a replacement after ``MEMORY_WORKER_MAX_TASKS`` (128) pool jobs could clear it.
+is of the 20 MiB class, where one job takes a child's resident set to several hundred MB; a
+child whose allocator keeps that memory once the job is done crosses the child bound on its
+next job, long before a replacement after ``MEMORY_WORKER_MAX_TASKS`` (128) pool jobs could clear it.
+``MEMORY_CHILD_BOUND_KB`` (360 MiB) sits between the two cases: the measured one-job ceiling
+of a child is 311012 kB with this allocator environment (292664 kB with ``LD_PRELOAD`` and
+``MALLOC_CONF`` alone), an idle child about 213 MB, so one job's working set is about 98 MB,
+and a child that kept one job's working set while running the next would sit at about 410 MB.
 
 What the load is sized to reach: a program the child has not compiled costs it two pool jobs,
 a program it has compiled one, so 512 chained calls plus one compile job per program per child come
@@ -73,9 +88,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tai42_kit.compute.settings import ComputeSettings
 
 from tai42_e2e.httpapi import ApiClient
-from tai42_e2e.manifests.memory import MEMORY_ALLOCATOR_PRELOAD
+from tai42_e2e.manifests.memory import MEMORY_ALLOCATOR_PRELOAD, MEMORY_ALLOCATOR_PYTHON
 from tai42_e2e.memory_budget import (
     MEMORY_CHILD_BOUND_KB,
     MEMORY_GROWTH_FACTOR,
@@ -121,6 +137,12 @@ MEMORY_DOCUMENT_ITEMS = 64_000
 # no short run of equal readings marks the end of the decay.
 MEMORY_IDLE_INTERVAL_S = 1.0
 MEMORY_IDLE_WAIT_S = 30.0
+# The pool bring-up's bound on rounds of probe calls, per uvicorn worker, before the tree must hold
+# every worker's compute pool.
+MEMORY_BRING_UP_ROUNDS_PER_WORKER = 8
+# The pool size the memory stack runs: its manifest leaves ``COMPUTE_WORKERS`` at the kit's
+# default, and the serve's environment is built without the test process's.
+MEMORY_POOL_SIZE: int = ComputeSettings.model_fields["workers"].default
 
 
 async def _run_tool(api: ApiClient, tool_name: str, arguments: dict[str, Any]) -> Any:
@@ -156,8 +178,10 @@ def _record_values(stack: TaiStack, key: str) -> list[str]:
     return [json.loads(record)["value"] for record in stack.records(key)]
 
 
-def _assert_allocator_mapped(pid: int) -> None:
-    """The serve process ``pid`` has the deployment's allocator mapped."""
+def _assert_allocator_env(pid: int) -> None:
+    """The serve process ``pid`` runs on the deployment's allocator environment: it has the
+    preloaded allocator mapped, and its environment routes the interpreter's allocations
+    through it."""
     maps = Path(f"/proc/{pid}/maps")
     try:
         mappings = maps.read_text()
@@ -168,6 +192,16 @@ def _assert_allocator_mapped(pid: int) -> None:
     assert MEMORY_ALLOCATOR_PRELOAD in mappings, (
         f"the serve process {pid} does not map {MEMORY_ALLOCATOR_PRELOAD}: the preload was not applied "
         "(is the library installed on this host?)"
+    )
+    environ = Path(f"/proc/{pid}/environ")
+    expected = f"PYTHONMALLOC={MEMORY_ALLOCATOR_PYTHON}"
+    try:
+        variables = environ.read_bytes().split(b"\0")
+    except OSError as exc:
+        raise AssertionError(f"cannot read {environ} to confirm the serve runs with {expected}: {exc}") from exc
+    assert expected.encode() in variables, (
+        f"the serve process {pid} does not run with {expected}: the interpreter's small objects "
+        "would bypass the preloaded allocator"
     )
 
 
@@ -181,6 +215,27 @@ def _sample(root_pid: int, label: str) -> ServeMemory:
         ", ".join(f"{worker.pid}={worker.threads}" for worker in sample.workers),
     )
     return sample
+
+
+async def _bring_up_every_pool(api: ApiClient, root_pid: int, workers: int, program: str) -> int:
+    """Send rounds of ``workers * MEMORY_POOL_SIZE`` chained ``program`` calls at once, sampling
+    after each, until the serve's tree holds that many compute-pool children; the number of
+    calls sent. Raise when ``MEMORY_BRING_UP_ROUNDS_PER_WORKER * workers`` rounds pass without it."""
+    expected = workers * MEMORY_POOL_SIZE
+    calls = 0
+    seen: list[int] = []
+    for attempt in range(1, MEMORY_BRING_UP_ROUNDS_PER_WORKER * workers + 1):
+        await asyncio.gather(*(_chain(api, program) for _ in range(expected)))
+        calls += expected
+        sample = _sample(root_pid, f"pool bring-up round {attempt}")
+        if len(sample.children) == expected:
+            return calls
+        seen = [child.pid for child in sample.children]
+    raise AssertionError(
+        f"the serve's tree did not reach {expected} compute-pool children ({workers} workers x "
+        f"{MEMORY_POOL_SIZE}) in {MEMORY_BRING_UP_ROUNDS_PER_WORKER * workers} bring-up rounds: "
+        f"the last sample held {len(seen)}, {seen}"
+    )
 
 
 async def _idle_wait(root_pid: int, label: str) -> list[ServeMemory]:
@@ -210,7 +265,7 @@ async def test_serve_memory_stays_bounded_under_repeated_jq_load(
 ) -> None:
     api = memory_stack.api()
     root_pid = memory_stack.process("serve").pid
-    _assert_allocator_mapped(root_pid)
+    _assert_allocator_env(root_pid)
 
     # The load is what it claims: a document of the floor's size, reaching jq as an array.
     document = await _run_tool(api, "e2e_document", {"items": MEMORY_DOCUMENT_ITEMS})
@@ -218,9 +273,16 @@ async def test_serve_memory_stays_bounded_under_repeated_jq_load(
     assert document_text_bytes >= MEMORY_DOCUMENT_TEXT_FLOOR, (
         f"the document renders {document_text_bytes} bytes of JSON, below the {MEMORY_DOCUMENT_TEXT_FLOOR} floor"
     )
+    # Every worker's compute pool up, each bring-up call checking that jq receives the document
+    # as an array.
     probe_key = uniq("mem-probe")
-    await _chain(api, f'{{key: "{probe_key}", value: (.items | length | tostring)}}')
-    assert _record_values(memory_stack, probe_key) == [str(MEMORY_DOCUMENT_ITEMS)], (
+    probe_calls = await _bring_up_every_pool(
+        api,
+        root_pid,
+        memory_stack.config.workers,
+        f'{{key: "{probe_key}", value: (.items | length | tostring)}}',
+    )
+    assert _record_values(memory_stack, probe_key) == [str(MEMORY_DOCUMENT_ITEMS)] * probe_calls, (
         f"jq did not receive the document as an array of {MEMORY_DOCUMENT_ITEMS} entries: "
         f"{memory_stack.records(probe_key)}"
     )
