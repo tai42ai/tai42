@@ -112,7 +112,7 @@ def _make_tool(op: OperationMetadata) -> Callable[..., Awaitable[object]]:
     func = op.func
 
     async def projected(**kwargs: Any) -> object:
-        if op.reload_gated and reload_gate.locked:
+        if op.reload_gated and reload_gate.reloading:
             raise ToolError(REJECT_MESSAGE)
         # Every tool door flows through here — MCP, ``tai tools run``, an agent, a preset, a hook,
         # and a schedule or a submit run inside a backend job — so the writer's own exit a change

@@ -1,20 +1,29 @@
-"""The lifespan-owned failed-MCP backoff re-probe task.
+"""The failed-MCP re-probe: the lifespan-owned backoff loop, its task lifecycle, the set-scoped
+re-probe of named titles, and the one apply seam every re-probe door binds through.
 
-Two layers:
+Sections:
 
-* A network-free ``_Mixin`` drives ``_reprobe_failed_mcps_loop`` with a
+* The loop: a network-free ``_Mixin`` drives ``_reprobe_failed_mcps_loop`` with a
   controllable clock (an instance ``_reprobe_sleep`` seam) and a scripted
   ``_probe_and_apply_failed``, proving: a recovering title gets its tools bound
   and leaves the failed set (real reload path); the interval doubles per
   all-failed pass and caps at the max, resetting on recovery, and a pass that
   probed nothing leaves it alone; an empty failed set probes nothing; the
-  failed-set snapshot is taken under the reload gate; the
-  probe runs OFF the gate so a reload-gated write is not blocked mid-probe; a
-  per-pass error is logged at ERROR and the loop survives; and the shutdown cancel
-  swallows a non-``CancelledError`` failure (already surfaced by the done-callback)
-  so teardown is never aborted.
-* The real process ``app`` proves ``app_context`` spawns the task and cancels it
-  cleanly at shutdown.
+  failed-set snapshot is taken under the reload gate without reading as a reload,
+  and a recovery is bound as a reload body; the probe runs OFF the gate so a
+  reload-gated write is not blocked mid-probe; a per-pass error is logged at ERROR
+  and the loop survives.
+* The task lifecycle: the shutdown cancel swallows a non-``CancelledError`` failure
+  (already surfaced by the done-callback) so teardown is never aborted; the
+  done-callback logs a runtime death at ERROR; a dead or returned perpetual task
+  is marked on ``LifecycleState`` and requests a graceful exit; and the real process ``app`` proves
+  ``app_context`` spawns the task and cancels it cleanly at shutdown.
+* The named-title pass: ``_reprobe_failed_titles`` probes only the named failed
+  titles in the manifest, off the gate on the whole start budget, and leaves the
+  loop's backoff alone.
+* The shared apply seam: the loop, the reload-failed door and a late start bind
+  through one apply, which skips a title cleared or edited while probing and
+  leaves a title whose start is in progress to that start.
 """
 
 from __future__ import annotations
@@ -339,6 +348,66 @@ async def test_empty_failed_set_probes_nothing(monkeypatch):
     assert intervals == [1.0, 1.0, 1.0]  # stays idle at the initial cadence
 
 
+# -- a pass reads under the gate as a plain holder and binds as a reload body -------
+
+
+async def test_a_pass_over_an_empty_failed_set_never_reads_as_a_reload(monkeypatch):
+    """The pass snapshots under the gate as a holder that only reads: a reload-gated door
+    meanwhile still serves, so a healthy process's passes never refuse a caller."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({})
+    m._failed_mcps = {}
+    monkeypatch.setattr("tai42_skeleton.app.lifecycle.CoreSettings", _settings(1.0, 8.0))
+    seen: list[bool] = []
+    m._refresh_manifest_mcp = lambda: seen.append(reload_gate.reloading)  # type: ignore[method-assign]
+
+    await _loop_pass(m)
+
+    assert seen == [False]
+
+
+async def test_a_recovered_server_is_bound_as_a_reload_body(monkeypatch):
+    """Binding a recovered server rewrites the live registries, so it runs as a reload body:
+    the gate reads as reloading while it applies."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._failed_mcps = {"svc": _row()}
+    m._probe_mcp = AsyncMock(return_value=[_FakeMcpTool()])
+    seen: list[bool] = []
+    apply = m._apply_probe_outcome
+
+    async def recording(title, config, outcome, *, awaited):
+        seen.append(reload_gate.reloading)
+        return await apply(title, config, outcome, awaited=awaited)
+
+    monkeypatch.setattr(m, "_apply_probe_outcome", recording)
+
+    results, still_failed = await m._probe_and_apply_failed({"svc": _cfg("svc")})
+
+    assert seen == [True]
+    assert [r["status"] for r in results] == ["ok"]
+    assert still_failed == set()
+    assert not reload_gate.reloading
+
+
+async def test_a_pass_with_nothing_to_probe_runs_no_reload_body(monkeypatch):
+    """Every failed server still starting leaves the snapshot empty: nothing is bound, so the
+    pass only reads the failed set and never closes the gated doors."""
+    m = _Mixin()
+    m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
+    m._record_failed_mcp(_cfg("svc"), McpStartPending("svc", 3.0, 15.0, start=StartId()))
+
+    async def no_reload_body(fn, *, reimports):
+        raise AssertionError("an empty snapshot ran a reload body")
+
+    monkeypatch.setattr(reload_gate, "run", no_reload_body)
+
+    results, still_failed = await m._probe_and_apply_failed({})
+
+    assert results == []
+    assert still_failed == {"svc"}
+
+
 # -- the probe runs OFF the gate, so a reload-gated write is not blocked ---------
 
 
@@ -347,9 +416,9 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
     network probe: the gate wraps only the brief snapshot/apply, so a reload-gated
     write stays fast while a pass is mid-probe.
 
-    Fails against the old under-gate code, which held the gate for the whole probe
-    (up to the 15s cold-boot budget) → the gated write below would block on the gate
-    until the probe finished, so ``wait_for`` would fire."""
+    A probe held under the gate would hold it for the whole probe (up to the start
+    budget), so the gated write below would block on the gate until the probe
+    finished and ``wait_for`` would fire."""
     m = _Mixin()
     m._manifest = Manifest.model_validate({"mcp": [_cfg("svc").model_dump()]})
     m._failed_mcps = {"svc": _row()}
@@ -377,20 +446,20 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
 
     m._reprobe_sleep = fake_sleep  # type: ignore[method-assign]
 
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
     task = asyncio.create_task(m._reprobe_failed_mcps_loop())
     try:
         await asyncio.wait_for(probing.wait(), timeout=5)  # the pass is mid-probe
 
         # A reload-gated write takes the reload gate; with the probe off the gate it
-        # acquires promptly. Under the old under-gate probe the lock is held for the
-        # whole (here, parked) probe, so this acquire would block and time out.
+        # acquires promptly. A probe under the gate would hold the lock for the whole
+        # (here, parked) probe, so this acquire would block and time out.
         async def gated_write() -> str:
             async with reload_gate.synchronized():
                 return "ok"
 
         assert await asyncio.wait_for(gated_write(), timeout=1) == "ok"
-        assert not reload_gate.locked  # nothing holds the gate during the probe
+        assert not reload_gate.reloading  # no reload body holds the gate during the probe
         # The probe holds nothing, so it waits the whole start budget (no shorter wait is passed).
         assert seen["wait"] is None
     finally:
@@ -400,7 +469,7 @@ async def test_in_flight_probe_does_not_block_gated_writes(monkeypatch):
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
 
 
 # -- a per-pass error is logged at ERROR and the loop survives ------------------

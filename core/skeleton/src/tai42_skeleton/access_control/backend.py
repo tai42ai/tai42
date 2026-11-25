@@ -119,7 +119,7 @@ class IdentityProviderUnavailableError(Exception):
     """No identity-provider factory resolved for a configured provider name — the registry held none.
 
     Distinct from an invalid credential (a resolved provider returning no identity): only THIS class is
-    treated as a reload-window transient when the reload gate is held; a bad key stays a 401 in every case.
+    treated as a reload-window transient while a reload body holds the reload gate; a bad key stays a 401 in every case.
     """
 
 
@@ -199,7 +199,7 @@ class AccessControlAuthBackend(AuthenticationBackend):
                 # surface already gives — never a spurious 401. Only THIS precise class
                 # gets the gate check; outside a reload a missing provider is a real
                 # fault and fails closed exactly like any verification error below.
-                if reload_gate.locked:
+                if reload_gate.reloading:
                     raise ReloadInProgressError(REJECT_MESSAGE) from e
                 logger.exception(
                     "access_control: identity provider unavailable with no reload in progress; "

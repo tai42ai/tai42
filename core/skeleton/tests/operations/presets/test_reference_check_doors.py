@@ -633,7 +633,7 @@ def test_the_projected_list_tool_answers_the_unreadable_row_as_a_tool_error(pg) 
     async def run() -> None:
         async with instance.app.app_context(_manifest()):
             await _seed_body("bad", _AGENT, {"tool_names": "x"})
-            async with reload_gate.synchronized():
+            async with reload_gate.driving():
                 with pytest.raises(ToolError, match=f"^{_BAD_TEXT}$"):
                     await projected.tools.funcs["list_presets"]()
 

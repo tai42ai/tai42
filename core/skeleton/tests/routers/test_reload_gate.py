@@ -1,7 +1,8 @@
 """The awaitable reload gate.
 
 Proves the reload lock's three surfaces: a gated route answers the retriable 503
-while a reload holds the gate; the serving loop is NOT frozen during a reload
+while a reload body holds the gate, and serves while a holder only waits a reload
+out or reads under the lock; the serving loop is NOT frozen during a reload
 (health + a read-only GET answer concurrently while the reload's body awaits on
 that loop); the FastMCP session middleware rejects a tool call the same way;
 after release everything answers again; the reload-through-gate path awaits its
@@ -100,21 +101,21 @@ async def test_reject_response_is_retriable_503() -> None:
 
 async def test_run_awaits_its_body_on_the_running_loop_and_returns_result() -> None:
     """With no other serving loop bound, the body is a coroutine awaited on the loop that
-    called ``run``, and ``run`` returns its result; the lock is held during and released after."""
+    called ``run``, and ``run`` returns its result; the gate reads as reloading during and not after."""
     gate = ReloadGate()
     seen: dict[str, Any] = {}
 
     async def body() -> dict[str, str]:
         seen["loop"] = asyncio.get_running_loop()
-        seen["locked"] = gate.locked
+        seen["reloading"] = gate.reloading
         return {"status": "ok"}
 
-    assert not gate.locked
+    assert not gate.reloading
     result = await gate.run(body, reimports=False)
     assert result == {"status": "ok"}
     assert seen["loop"] is asyncio.get_running_loop()
-    assert seen["locked"] is True
-    assert not gate.locked
+    assert seen["reloading"] is True
+    assert not gate.reloading
 
 
 # -- run(reimports=True) also excludes a forking backend's job children ------
@@ -175,7 +176,7 @@ async def test_run_releases_the_fork_gate_when_the_body_raises() -> None:
         await gate.run(body, reimports=True)
     assert not fork_gate.blocked
     assert fork_gate._owner is None
-    assert not gate.locked
+    assert not gate.reloading
 
 
 async def test_a_reimporting_reload_a_job_runs_does_not_wait_on_that_jobs_span(
@@ -222,7 +223,7 @@ async def test_two_jobs_running_a_reimporting_reload_at_once_do_not_hold_each_ot
                 await gate.run(lambda: body("first"), reimports=True)
 
             task = asyncio.create_task(reload())
-            while not gate.locked:
+            while not gate.reloading:
                 await asyncio.sleep(0.01)
             first_holds_the_lock.set()
             await task
@@ -264,12 +265,12 @@ def _on_a_loop_of_its_own(
 
 
 async def test_the_gate_excludes_holders_on_two_loops_in_two_threads() -> None:
-    """A serving loop and a job's private loop both hold the gate: the holds never overlap,
-    and the loop that is not holding reads the gate as locked while the other holds."""
+    """A serving loop and a job's private loop both drive a reload body: the holds never overlap,
+    and the loop that is not holding reads the gate as reloading while the other drives."""
     gate = ReloadGate()
     windows: list[tuple[float, float]] = []
     first_holds = threading.Event()
-    seen_locked: list[bool] = []
+    seen_reloading: list[bool] = []
 
     async def first() -> None:
         async with gate.driving():
@@ -280,7 +281,7 @@ async def test_the_gate_excludes_holders_on_two_loops_in_two_threads() -> None:
 
     async def second() -> None:
         assert await asyncio.to_thread(first_holds.wait, 5.0)
-        seen_locked.append(gate.locked)
+        seen_reloading.append(gate.reloading)
         async with gate.driving():
             started = time.monotonic()
             await asyncio.sleep(0.3)
@@ -290,14 +291,14 @@ async def test_the_gate_excludes_holders_on_two_loops_in_two_threads() -> None:
     for thread, _ in threads:
         await asyncio.to_thread(thread.join, 10.0)
     assert [errors for _, errors in threads] == [[], []]
-    assert seen_locked == [True]
+    assert seen_reloading == [True]
     (first_start, first_end), (second_start, _) = windows
     assert second_start >= first_end > first_start
 
 
 async def test_a_second_loop_touching_the_gate_keeps_the_first_loops_hold() -> None:
-    """While this loop holds the gate, another loop on another thread asks for it: this loop's
-    gate still reads as locked, and a second holder on this loop waits for the first to release."""
+    """While this loop drives a reload body, another loop on another thread asks for the gate: this
+    loop's gate still reads as reloading, and a second holder on this loop waits for the first to release."""
     gate = ReloadGate()
     order: list[str] = []
     asking = threading.Event()
@@ -315,10 +316,10 @@ async def test_a_second_loop_touching_the_gate_keeps_the_first_loops_hold() -> N
         thread, errors = _on_a_loop_of_its_own(other_loop)
         assert await asyncio.to_thread(asking.wait, 5.0)
         await asyncio.sleep(0.2)
-        assert gate.locked
+        assert gate.reloading
         second = asyncio.create_task(second_holder())
         await asyncio.sleep(0.2)
-        assert gate.locked
+        assert gate.reloading
         assert order == []
         order.append("first holder released")
     await asyncio.wait_for(second, 10.0)
@@ -326,7 +327,7 @@ async def test_a_second_loop_touching_the_gate_keeps_the_first_loops_hold() -> N
     assert errors == []
     assert order[0] == "first holder released"
     assert sorted(order[1:]) == ["other loop held", "second holder held"]
-    assert not gate.locked
+    assert not gate.reloading
 
 
 async def test_a_job_on_its_own_loop_running_a_reimporting_reload_beside_another_does_not_hold_it_up(
@@ -347,7 +348,7 @@ async def test_a_job_on_its_own_loop_running_a_reimporting_reload_beside_another
         windows[name] = (began, time.monotonic() - started)
 
     async def second_reload() -> None:
-        await _until(lambda: gate.locked)
+        await _until(lambda: gate.reloading)
         await gate.run(lambda: body("second"), reimports=True)
 
     errors: list[BaseException] = []
@@ -418,7 +419,7 @@ async def test_a_job_whose_wait_for_the_reload_lock_stops_early_runs_on_only_aft
         queued = asyncio.create_task(job())
         await span_open.wait()
         reload = asyncio.create_task(gate.run(body, reimports=True))
-        while not gate.locked:
+        while not gate.reloading:
             await asyncio.sleep(0.01)
         lock_held.set()
         await asyncio.wait_for(in_body.wait(), 3.0)
@@ -437,20 +438,20 @@ async def test_a_job_whose_wait_for_the_reload_lock_stops_early_runs_on_only_aft
     assert fork_gate.live_spans == 0
 
 
-# -- gated routes reject while the gate is held ------------------------------
+# -- gated routes reject while a reload body holds the gate ------------------
 
 
 async def test_gated_routes_reject_while_reloading(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every run / live-registry-mutation / reload-trigger route answers the
-    retriable 503 while a reload holds the gate, then answers normally after."""
+    retriable 503 while a reload body holds the gate, then answers normally after."""
 
     async def _assert_rejected(resp: Any) -> None:
         assert resp.status_code == 503
         assert resp.headers["Retry-After"] == "5"
         assert _json(resp) == {"error": REJECT_MESSAGE, "reloading": True}
 
-    async with reload_gate.synchronized():
-        assert reload_gate.locked
+    async with reload_gate.driving():
+        assert reload_gate.reloading
         # A run surface.
         await _assert_rejected(await tools_router.run_tool(_body_req(b"{}", "/api/run-tool")))
         await _assert_rejected(await tool_runs_router.submit_run(_body_req(b"{}", "/api/tool-runs")))
@@ -472,10 +473,54 @@ async def test_gated_routes_reject_while_reloading(monkeypatch: pytest.MonkeyPat
 
     # Released: a run surface is past the gate again — the request reaches normal
     # handling (here a 400 for the missing tool name), not the 503 rejection.
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
     monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_FakeTools({})))
     resp = await tools_router.run_tool(_body_req(b"{}", "/api/run-tool"))
     assert resp.status_code == 400
+
+
+async def test_a_hold_that_only_waits_or_reads_closes_no_door(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``synchronized`` holder waits a reload out or reads under the lock and applies no reload,
+    so while it holds the gate the gate reads as not reloading and every gated door serves: a
+    gated route reaches normal handling, a projected reload-gated operation runs, and a session
+    tool call dispatches."""
+    from tai42_contract.manifest import ApiToolsConfig
+
+    from tai42_skeleton.operations import OperationRegistry, operation
+    from tai42_skeleton.operations.projection import project_operations
+
+    registry = OperationRegistry()
+
+    @operation(name="gated_op", summary="A reload-gated operation", tags=["t"], registry=registry, reload_gated=True)
+    async def gated_op() -> dict[str, str]:
+        return {"status": "ok"}
+
+    projected: dict[str, Any] = {}
+
+    class _Tools:
+        def tool(self, *, force: Any, name: str, tags: Any, annotations: Any) -> Callable[[Any], Any]:
+            def decorator(func: Any) -> Any:
+                projected[name] = func
+                return func
+
+            return decorator
+
+    project_operations(SimpleNamespace(tools=_Tools()), ApiToolsConfig(include=["gated_op"]), registry=registry)
+    monkeypatch.setattr(tai42_app, "_impl", SimpleNamespace(tools=_FakeTools({})))
+    calls: list[str] = []
+
+    async def call_next(context: Any) -> str:
+        calls.append("dispatched")
+        return "tool-result"
+
+    async with reload_gate.synchronized():
+        assert not reload_gate.reloading
+        resp = await tools_router.run_tool(_body_req(b"{}", "/api/run-tool"))
+        assert resp.status_code == 400
+        assert await projected["gated_op"]() == {"status": "ok"}
+        result = await ReloadRejectionMiddleware(reload_gate).on_call_tool(cast(Any, object()), call_next)
+        assert result == "tool-result"
+    assert calls == ["dispatched"]
 
 
 # -- the serving loop is NOT frozen during a reload --------------------------
@@ -500,7 +545,7 @@ async def test_serving_loop_not_frozen_during_reload(monkeypatch: pytest.MonkeyP
     task = asyncio.create_task(reload_gate.run(awaiting_reload, reimports=True))
     try:
         await asyncio.wait_for(entered.wait(), 5.0)
-        assert reload_gate.locked
+        assert reload_gate.reloading
         # The serving loop keeps answering while the reload's body awaits on it.
         health_resp = await health_router.health_check(cast(Request, object()))
         assert health_resp.status_code == 200
@@ -514,15 +559,15 @@ async def test_serving_loop_not_frozen_during_reload(monkeypatch: pytest.MonkeyP
 
     assert result == {"status": "ok", "env_keys": 3, "awaiting_respawn": []}
     assert body_loop["loop"] is serving_loop  # the reload's body ran on the serving loop itself
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
 
 
 # -- FastMCP session middleware ----------------------------------------------
 
 
 async def test_middleware_rejects_session_tool_call_while_reloading() -> None:
-    """A session ``tools/call`` raises the retriable reloading error while the gate
-    is held, and passes through once released — never dispatching while held."""
+    """A session ``tools/call`` raises the retriable reloading error while a reload body
+    holds the gate, and passes through once released — never dispatching while held."""
     middleware = ReloadRejectionMiddleware(reload_gate)
     calls: list[str] = []
 
@@ -530,7 +575,7 @@ async def test_middleware_rejects_session_tool_call_while_reloading() -> None:
         calls.append("dispatched")
         return "tool-result"
 
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         with pytest.raises(ToolError) as excinfo:
             await middleware.on_call_tool(cast(Any, object()), call_next)
         assert str(excinfo.value) == REJECT_MESSAGE
@@ -578,11 +623,11 @@ def _fork_and_call_a_gated_tool() -> str:
 async def test_a_child_forked_while_the_parent_holds_the_gate_serves_gated_calls() -> None:
     """A forked child runs no reload of its own, and the parent's hold can never be released in
     it, so the child starts with the gate free: a backend job child forked while its worker
-    holds the gate (a fleet op applying, a re-probe pass) runs its gated calls instead of
+    drives a reload body (a fleet op applying, a recovery bind) runs its gated calls instead of
     answering ``reloading`` for its whole life. The parent's own calls are still rejected."""
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         assert await asyncio.to_thread(_fork_and_call_a_gated_tool) == "dispatched"
-        assert reload_gate.locked
+        assert reload_gate.reloading
 
 
 def test_reload_rejection_middleware_registered_on_server() -> None:
@@ -646,7 +691,7 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
     )
     monkeypatch.setattr(instance.app, "_bus", FakeBus(origin="serve-x"))
 
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
     resp = await config_router.write_env(_body_req(b'{"env": {"NEW": "val"}}', "/api/config/env"))
 
     assert resp.status_code == 200
@@ -666,7 +711,7 @@ async def test_write_env_reloads_through_gate_same_result_shape(monkeypatch: pyt
     assert admin.reloads == 1
     # The reload was awaited on the serving loop itself.
     assert admin.reload_loop is asyncio.get_running_loop()
-    assert not reload_gate.locked  # released after the route returns
+    assert not reload_gate.reloading  # released after the route returns
 
 
 # -- the work engaged with the gate, recorded on its generation ----------------
@@ -702,14 +747,15 @@ async def test_driving_records_the_request_as_waiting_then_driving_until_it_fini
             await asyncio.sleep(0)
         # Waiting: it cannot move, so it is out of the in-flight count; not yet driving.
         assert (len(epoch.waiting), epoch.driving, epoch.in_flight) == (1, set(), 0)
-        assert reload_gate.locked
+        # The holder only synchronizes: it applies no reload.
+        assert not reload_gate.reloading
     await inside.wait()
     (state,) = epoch.driving
     # Driving: out of the in-flight count, no longer waiting.
     assert (epoch.waiting, epoch.in_flight, state.slot_released) == (set(), 0, True)
     await after_gate.wait()
     assert epoch.driving == {state}, "a driver stays recorded after the gated body until its request ends"
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
     finish.set()
     await request
     assert (epoch.driving, epoch.waiting, epoch.in_flight, state.finished.is_set()) == (set(), set(), 0, True)
@@ -767,8 +813,8 @@ async def test_work_outside_any_request_or_run_holds_the_gate_and_records_nothin
     epoch = Epoch(number=0)
     assert current_admission() is None
     async with reload_gate.driving():
-        assert reload_gate.locked
+        assert reload_gate.reloading
     async with reload_gate.synchronized():
-        assert reload_gate.locked
-    assert not reload_gate.locked
+        assert not reload_gate.reloading
+    assert not reload_gate.reloading
     assert not epoch.engaged

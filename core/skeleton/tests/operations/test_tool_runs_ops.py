@@ -1026,7 +1026,7 @@ async def test_a_background_run_of_a_turn_door_during_a_reload_records_the_refus
     from tai42_skeleton.app.reload_gate import REJECT_MESSAGE
     from tai42_skeleton.conversations.turn import admission, api_door
 
-    wired.monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(locked=True))
+    wired.monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(reloading=True))
     tools = wired.install()
     raised: list[BaseException] = []
 

@@ -73,7 +73,7 @@ def _reload_gated(fn: Callable[[Request], Awaitable[Response]]) -> Callable[[Req
 
     @functools.wraps(fn)
     async def gated(request: Request) -> Response:
-        if reload_gate.locked:
+        if reload_gate.reloading:
             return reload_gate.reject_response()
         return await fn(request)
 

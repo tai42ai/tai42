@@ -152,7 +152,7 @@ class ReloadRejectionMiddleware(Middleware):
     """Reject an MCP session tool call while a config reload holds the reload gate.
 
     A session ``tools/call`` is a run surface exactly like ``POST /api/run-tool``,
-    so it inherits the same retriable rejection: while the gate is held the call
+    so it inherits the same retriable rejection: while a reload body holds the gate the call
     raises a :class:`~fastmcp.exceptions.ToolError` carrying the shared reloading
     message (client-visible), rather than dispatching against registries a reload
     is tearing down and rebuilding. Registered once at construction alongside
@@ -168,7 +168,7 @@ class ReloadRejectionMiddleware(Middleware):
         context: MiddlewareContext[Any],
         call_next: "Callable[[MiddlewareContext[Any]], Awaitable[Any]]",
     ) -> Any:
-        """Reject the tool call with the reloading message while the gate is held, else delegate."""
-        if self._gate.locked:
+        """Reject the tool call with the reloading message while a reload body holds the gate, else delegate."""
+        if self._gate.reloading:
             raise ToolError(REJECT_MESSAGE)
         return await call_next(context)

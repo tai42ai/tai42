@@ -14,5 +14,5 @@ def refuse_turn_while_reloading() -> None:
     behind and a redelivery is processed in full. :class:`ServerReloadingError` is retriable and
     is neither a ``ValueError`` nor a ``LookupError``, so no channel door acknowledges and drops it.
     """
-    if reload_gate.locked:
+    if reload_gate.reloading:
         raise ServerReloadingError(REJECT_MESSAGE)

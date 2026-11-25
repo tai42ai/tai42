@@ -397,7 +397,7 @@ async def test_apply_releases_the_fork_gate_when_the_build_raises(monkeypatch: p
     with pytest.raises(_BuildBoomError):
         await _service(store).apply_replace_env({"MY_APP_FLAG": "new"}, save_previous=_PrevSpy(), build_and_swap=_build)
     assert not fork_gate.blocked
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
 
 
 class _StoreChangingBus(FakeBus):
@@ -436,7 +436,7 @@ async def test_a_store_change_before_the_gates_is_refused_before_the_build(monke
     assert swapped == {}
     assert store.env_writes == []
     assert not fork_gate.blocked
-    assert not reload_gate.locked
+    assert not reload_gate.reloading
 
 
 # ---------------------------------------------------------------------------

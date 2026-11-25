@@ -44,7 +44,7 @@ def advertised_authorization_servers() -> tuple[str, ...]:
     for name in settings.resolved_auth_providers():
         provider = tai42_app.accounts.active_provider(name)
         if provider is None:
-            if reload_gate.locked:
+            if reload_gate.reloading:
                 continue
             raise RuntimeError(f"identity provider {name!r} is not registered; no reload is in progress")
         servers.update(dict.fromkeys(provider.authorization_servers()))

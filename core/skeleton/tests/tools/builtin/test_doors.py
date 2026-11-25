@@ -413,7 +413,7 @@ async def test_a_door_tool_run_while_reloading_fails_unavailable(
     env.seed_route("chat")
     ac.add_route("/api/conversations/chat/messages", "conv-x")
     _seed_key(ac, "runner", ["conv-x"])
-    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(locked=True))
+    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(reloading=True))
 
     async with bind_execution_identity("runner", bound_fingerprint="fp-runner"):
         with pytest.raises(ServerReloadingError) as excinfo:

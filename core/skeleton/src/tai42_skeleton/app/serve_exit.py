@@ -169,7 +169,7 @@ async def end_streams_after_in_flight_replies(server: uvicorn.Server) -> None:
             retires += len(tails)
             await asyncio.wait(tails)
             continue
-        if current_epoch_or_none() is epoch and not reload_gate.locked:
+        if current_epoch_or_none() is epoch and not reload_gate.reloading:
             break
     logger.info("serve exit: in-flight replies written (%d deferred retire(s) awaited); ending event streams", retires)
     AppStatus.should_exit = True

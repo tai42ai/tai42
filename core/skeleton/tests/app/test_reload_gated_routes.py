@@ -60,7 +60,7 @@ def _request() -> Request:
 
 async def test_a_reload_gated_route_is_refused_while_reloading(monkeypatch: pytest.MonkeyPatch) -> None:
     registry, fast, returned = _register(monkeypatch, reload_gated=True)
-    monkeypatch.setattr(app_http, "reload_gate", SimpleNamespace(locked=True, reject_response=_reject))
+    monkeypatch.setattr(app_http, "reload_gate", SimpleNamespace(reloading=True, reject_response=_reject))
     (served,) = fast.served
     # The served handler AND the module-level name are the wrapper.
     assert served is returned
@@ -75,14 +75,14 @@ async def test_a_reload_gated_route_is_refused_while_reloading(monkeypatch: pyte
 
 async def test_a_reload_gated_route_runs_when_the_gate_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
     _registry, _fast, returned = _register(monkeypatch, reload_gated=True)
-    monkeypatch.setattr(app_http, "reload_gate", SimpleNamespace(locked=False, reject_response=_reject))
+    monkeypatch.setattr(app_http, "reload_gate", SimpleNamespace(reloading=False, reject_response=_reject))
     response = await returned(_request())
     assert bytes(response.body) == b"ran"
 
 
 async def test_an_ungated_route_is_served_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
     _registry, fast, returned = _register(monkeypatch, reload_gated=False)
-    monkeypatch.setattr(app_http, "reload_gate", SimpleNamespace(locked=True, reject_response=_reject))
+    monkeypatch.setattr(app_http, "reload_gate", SimpleNamespace(reloading=True, reject_response=_reject))
     assert fast.served == [_synthetic]
     assert returned is _synthetic
     assert bytes((await returned(_request())).body) == b"ran"

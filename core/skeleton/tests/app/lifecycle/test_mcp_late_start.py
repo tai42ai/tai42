@@ -1,5 +1,5 @@
 """An MCP server start that outlives its caller's wait: the ``starting`` record, the late
-outcome's apply on the serving loop under the reload gate, and the context it runs from."""
+outcome's apply on the serving loop as a reload body, and the context it runs from."""
 
 from __future__ import annotations
 
@@ -91,6 +91,26 @@ def test_a_start_that_completes_after_the_reload_wait_binds_through_the_apply_se
         assert m._failed_mcps["svc"]["category"] == "starting"
         _until(lambda: "svc" not in m._failed_mcps)
     assert applied == ["svc"]
+    assert m._mcp_bound_tools["svc"] == {"svc_t"}
+
+
+def test_a_late_start_outcome_is_applied_as_a_reload_body(short_reload_wait, monkeypatch):
+    server = _SlowListing(0.4)
+    m = _slow_mixin(monkeypatch, server)
+    reloading: list[bool] = []
+    apply = m._apply_probe_outcome
+
+    async def recording_apply(title, config, outcome, *, awaited):
+        reloading.append(reload_gate.reloading)
+        return await apply(title, config, outcome, awaited=awaited)
+
+    monkeypatch.setattr(m, "_apply_probe_outcome", recording_apply)
+    with owner_loop() as loop:
+        bind_as_serving(m, loop)
+        _rebuild_listing(m, loop)
+        assert m._failed_mcps["svc"]["category"] == "starting"
+        _until(lambda: "svc" not in m._failed_mcps)
+    assert reloading == [True]
     assert m._mcp_bound_tools["svc"] == {"svc_t"}
 
 

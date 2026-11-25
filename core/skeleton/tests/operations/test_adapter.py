@@ -192,7 +192,7 @@ def test_reload_gate_honored_on_route_edge():
     _, handler = _register(reg, reload_gated=True)
 
     async def run():
-        async with reload_gate.synchronized():
+        async with reload_gate.driving():
             return await handler(_request("POST", "/api/sample/greet", body={"name": "ann"}))
 
     resp = asyncio.run(run())

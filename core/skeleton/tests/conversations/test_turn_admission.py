@@ -31,7 +31,7 @@ def _untouchable(*_args, **_kwargs):
 @pytest.fixture
 def reloading(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hold the reload gate, and make every store, route and caps read a loud failure."""
-    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(locked=True))
+    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(reloading=True))
     for module in (intake, api_door, event_door):
         monkeypatch.setattr(module.cache, "get_conversations_manager", _untouchable)
         if hasattr(module, "get_turn_caps"):
@@ -73,7 +73,7 @@ async def test_submit_event_refuses_while_reloading(reloading) -> None:
 
 
 async def test_the_gate_released_admits(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(locked=False))
+    monkeypatch.setattr(admission, "reload_gate", SimpleNamespace(reloading=False))
     admission.refuse_turn_while_reloading()
 
 

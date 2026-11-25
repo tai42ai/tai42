@@ -1,7 +1,7 @@
 """The process-wide reload gate — the mutual-exclusion seam between an admin config reload and the live serving surface.
 
-A reload (`admin.reload_config` / `admin.reload_mcp` / the failed-MCP re-probe)
-re-reads env, resets settings caches, re-imports the manifest modules and re-probes
+A reload (`admin.reload_config` / `admin.reload_mcp` / the failed-MCP re-probe's apply of
+the servers it recovered) re-reads env, resets settings caches, re-imports the manifest modules and re-probes
 every MCP server. Its body is a coroutine awaited on the loop the process serves from,
 whatever loop its door is driven from (an in-process backend job's own loop included): the
 generation it builds, its FastMCP lifespan and background loops, the ``PresetManager``'s
@@ -17,10 +17,12 @@ that one loop, so every step of the body runs there:
   step of the rebuild (a module import) holds the loop. The worker-bus heartbeat runs on
   its own thread and does not pause, except in a process run under a process prelude,
   where it is a task of the loop (:mod:`tai42_skeleton.app.bus.life`);
-* while the lock is held, routes that dispatch a run or mutate the live
+* while a reload body holds the gate (:meth:`ReloadGate.run`, read as
+  :attr:`ReloadGate.reloading`), routes that dispatch a run or mutate the live
   tool/agent registries answer :meth:`reject_response` (HTTP 503, retriable), and
   the FastMCP session surface rejects tool calls the same way. Health, liveness
-  and read-only GETs keep answering;
+  and read-only GETs keep answering. A holder that only waits a reload out or reads
+  under the lock (:meth:`ReloadGate.synchronized`) closes no door;
 * a body declared ``reimports=True`` ALSO holds ``fork_gate.exclusive_async`` around the
   body, which excludes the OTHER live consumers of this process's modules:
   a backend work loop that forks a job child, and a backend job that runs in this
@@ -39,8 +41,9 @@ that one loop, so every step of the body runs there:
   neither import nor fork, and it counts again before the job runs on.
 
 Only ``reload_config`` re-imports. ``reload_mcp`` / ``deregister_mcp`` /
-``reload_failed_mcps`` re-probe MCP servers and rebind tools against modules already
-in ``sys.modules``; they declare ``reimports=False`` and do NOT stall a forking
+``reload_failed_mcps`` and the failed-MCP re-probe's apply of its outcomes (a background
+pass's recoveries, a late start outcome) re-probe MCP servers or rebind tools against
+modules already in ``sys.modules``; they declare ``reimports=False`` and do NOT stall a forking
 backend's jobs, which matters because an MCP re-probe can take a while and job
 throughput should not pay for it.
 
@@ -68,8 +71,9 @@ for the lock cannot move, so it leaves the in-flight count while it waits:
   admitted work leaves the in-flight count: it cannot finish before the gate is released,
   which happens only after the retire it drives has returned.
 * :meth:`ReloadGate.synchronized` — the holder only waits a reload out or reads under
-  the lock (a tool lookup that missed mid-rebuild, a re-probe pass). It is recorded as
-  waiting while it waits and is ordinary in-flight work again once it holds the lock.
+  the lock (a tool lookup that missed mid-rebuild, a re-probe pass's snapshot, a retire or
+  exit waiting a reload out). It is recorded as waiting while it waits and is ordinary
+  in-flight work again once it holds the lock.
 
 Both acquire through :func:`hold_recorded`, as does any other lock whose holder may drive a
 retire (the config-write lock a settings-profile apply holds across its build), so every such
@@ -372,8 +376,9 @@ class ReloadGate:
     """
 
     def __init__(self) -> None:
-        """Create the gate with its lock free."""
+        """Create the gate with its lock free and no reload body holding it."""
         self._lock = ProcessLock()
+        self._reloading = False
 
     @asynccontextmanager
     async def driving(self) -> AsyncIterator[None]:
@@ -384,7 +389,11 @@ class ReloadGate:
         """
         async with hold_recorded(self._lock) as party:
             party.drive()
-            yield
+            self._reloading = True
+            try:
+                yield
+            finally:
+                self._reloading = False
 
     @asynccontextmanager
     async def synchronized(self) -> AsyncIterator[None]:
@@ -396,13 +405,14 @@ class ReloadGate:
             yield
 
     @property
-    def locked(self) -> bool:
-        """Whether a reload is in progress.
+    def reloading(self) -> bool:
+        """Whether a reload body holds the gate: a :meth:`run` body rewriting env, caches, modules or registries.
 
-        A plain flag read that never touches a loop, so a route entry check is
-        safe from any loop and thread.
+        A plain attribute read that never touches a loop, so a route entry check is safe from
+        any loop and thread. False while a holder only waits a reload out or reads under the
+        lock (:meth:`synchronized`).
         """
-        return self._lock.locked
+        return self._reloading
 
     async def run(self, fn: Callable[[], Awaitable[T]], *, reimports: bool) -> T:
         """Hold the reload lock and await the reload body ``fn`` on the serving loop.
@@ -437,9 +447,10 @@ class ReloadGate:
     def reset_after_fork(self) -> None:
         """Start a forked child with the gate free: it inherits no hold of the parent's."""
         self._lock.reset_after_fork()
+        self._reloading = False
 
     def reject_response(self) -> JSONResponse:
-        """Return the retriable 503 a gated route serves while a reload holds the lock.
+        """Return the retriable 503 a gated route serves while a reload body holds the gate.
 
         Explicit and loud so a client/CLI can branch on ``reloading``.
         """
@@ -451,7 +462,7 @@ class ReloadGate:
 
 
 # The one process-wide gate. Routers import this singleton and check
-# ``reload_gate.locked`` at entry; reload callers await ``reload_gate.run(...)``.
+# ``reload_gate.reloading`` at entry; reload callers await ``reload_gate.run(...)``.
 reload_gate = ReloadGate()
 if sys.platform != "win32":
     os.register_at_fork(after_in_child=reload_gate.reset_after_fork)
