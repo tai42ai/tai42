@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: "full = every gate; ui-e2e = the browser job alone"
+        description: "full = every gate; ui-e2e = the browser job alone; memory = the serve memory job alone"
         type: choice
         default: full
-        options: [full, ui-e2e]
+        options: [full, ui-e2e, memory]
       browsers:
         description: "Engines the browser job runs: all = chromium + the firefox/webkit widening"
         type: choice
@@ -59,11 +59,11 @@ jobs:
   # leg; a change to shared roots (core/*, e2e, the lock, root pyproject, the
   # root fleet tests, or .github) runs the full workspace including e2e. A manual
   # `workflow_dispatch` on the default `full` lane treats everything as changed:
-  # it forces core=true and every downstream gate on. `lane=ui-e2e` inverts that —
-  # every gate off and every matrix empty, so the browser job is the only one
-  # that runs. The dynamic `check_matrix` / `process_namespace_matrix` /
-  # `e2e_backends` outputs, plus the `run_monitoring` / `run_ui` / `run_browsers`
-  # gates, are computed from these booleans so an unchanged member never runs a
+  # it forces core=true and every downstream gate on. `lane=ui-e2e` and
+  # `lane=memory` invert that — every gate off and every matrix empty, so the one
+  # job the lane names is the only one that runs. The dynamic `check_matrix` /
+  # `process_namespace_matrix` / `e2e_backends` outputs, plus the `run_monitoring` /
+  # `run_ui` / `run_browsers` / `run_memory` gates, are computed from these booleans so an unchanged member never runs a
   # silent green no-op.
   changes:
     needs: reuse
@@ -83,6 +83,8 @@ jobs:
       browser_engines: ${{ steps.assemble.outputs.browser_engines }}
       browser_lane: ${{ steps.assemble.outputs.browser_lane }}
       needs_heavy: ${{ steps.assemble.outputs.needs_heavy }}
+      train_branch: ${{ steps.assemble.outputs.train_branch }}
+      run_memory: ${{ steps.assemble.outputs.run_memory }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # Full history so the release-bookkeeping classifier can diff the base...head
@@ -135,10 +137,11 @@ jobs:
           # A manual dispatch has no diff base and the weekly schedule is meant to be
           # exhaustive, so neither can lean on the path filter to decide what changed:
           # treat the whole workspace as changed and force every gate on. The
-          # `ui-e2e` lane is the exception: it asks for the browser job alone, so it
-          # takes the short circuit below instead of the filter.
-          FORCE_FULL: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != 'ui-e2e') || github.event_name == 'schedule' }}
+          # `ui-e2e` and `memory` lanes are the exception: each asks for one job alone,
+          # so it takes the short circuit below instead of the filter.
+          FORCE_FULL: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane == 'full') || github.event_name == 'schedule' }}
           UI_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'ui-e2e' }}
+          MEMORY_LANE: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'memory' }}
           # `browsers=chromium` drops the firefox + webkit widening; every
           # non-dispatch event keeps it.
           WIDEN: ${{ github.event_name != 'workflow_dispatch' || inputs.browsers != 'chromium' }}
@@ -163,9 +166,21 @@ jobs:
               printf '["chromium"]'
             fi
           }
-          # The dispatched browser lane runs the ui-e2e job and nothing else: every
-          # matrix is empty and every other gate is off, whatever the filter saw.
-          if [ "$UI_LANE" = "true" ]; then
+          # The release-please train branch: the PR whose squash merge mints the tags (its
+          # head_ref), or a manual run on that branch (its ref_name). The gates that must pass
+          # before that merge run here and nowhere else; the merge commit's own push on main
+          # re-runs none of them.
+          train_branch=false
+          case "${HEAD_REF:-}" in release-please--*) train_branch=true ;; esac
+          case "${REF_NAME:-}" in release-please--*) train_branch=true ;; esac
+          # A dispatched single lane (the browser lane or the memory lane) runs its one job
+          # and nothing else: every matrix is empty and every other gate is off, whatever
+          # the filter saw.
+          if [ "$UI_LANE" = "true" ] || [ "$MEMORY_LANE" = "true" ]; then
+            lane_browsers=false
+            if [ "$UI_LANE" = "true" ]; then
+              lane_browsers=$WIDEN
+            fi
             {
               echo 'core=false'
               echo 'check_matrix={"include":[]}'
@@ -174,11 +189,13 @@ jobs:
               echo 'run_e2e=false'
               echo 'e2e_backends=[]'
               echo 'run_monitoring=false'
-              echo 'run_ui=true'
-              echo "run_browsers=$WIDEN"
-              echo "browser_engines=$(engine_list "$WIDEN")"
-              echo 'browser_lane=true'
+              echo "run_ui=$UI_LANE"
+              echo "run_browsers=$lane_browsers"
+              echo "browser_engines=$(engine_list "$lane_browsers")"
+              echo "browser_lane=$UI_LANE"
               echo 'needs_heavy=true'
+              echo "train_branch=$train_branch"
+              echo "run_memory=$MEMORY_LANE"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -192,9 +209,9 @@ jobs:
           # member) rather than the lock-incidental subset its bookkeeping-only diff
           # would otherwise select. The heavy e2e / browser lanes add no signal to a
           # bookkeeping-only tree and are gated off it by needs_heavy below.
-          case "${HEAD_REF:-}" in
-            release-please--*) CORE=true ;;
-          esac
+          if [ "$train_branch" = "true" ]; then
+            CORE=true
+          fi
           # member table: name|dir|package|import_path|sync_extra|legs|pytest_mode|process_namespace_variable
           # import_path empty -> core/e2e (no packaged-descriptor gate);
           # legs empty -> the member has no e2e trigger;
@@ -311,18 +328,16 @@ jobs:
           # keep them on unconditionally (handled above by FORCE_FULL / the ui lane).
           needs_heavy=true
           # A release-please train carries only version bumps and their derived ranges;
-          # it is detected once here. The train enters through two doors: the
-          # train PR (its head_ref, or a push to that same release-please-- branch) and
-          # the merge commit release-please lands on main (a push whose ref is main and
-          # whose title is release-please's own — the default `chore: release main`,
-          # squash-merged as `chore: release main (#N)`). The merge push carries the same
-          # release the PR does, so the same gating holds across it; no
-          # other main push is a train. A forced-full dispatch and the weekly schedule
+          # it is detected once here. The train enters through two doors: the train
+          # branch (train_branch above) and the merge commit release-please lands on
+          # main (a push whose ref is main and whose title is release-please's own — the
+          # default `chore: release main`, squash-merged as `chore: release main (#N)`).
+          # The merge push carries the same release the PR does, so the same gating
+          # holds across it; no other main push is a train. A forced-full dispatch and the weekly schedule
           # leave is_train false so every heavy lane runs.
           is_train=false
           if [ "$FORCE_FULL" != "true" ]; then
-            case "${HEAD_REF:-}" in release-please--*) is_train=true ;; esac
-            case "${REF_NAME:-}" in release-please--*) is_train=true ;; esac
+            is_train=$train_branch
             if [ "${REF_NAME:-}" = "main" ]; then
               title=${HEAD_COMMIT_MSG%%$'\n'*}
               if [[ "$title" =~ ^chore:\ release\ main(\ \(#[0-9]+\))?$ ]]; then
@@ -354,6 +369,9 @@ jobs:
             echo "browser_engines=$(engine_list "$run_browsers")"
             echo "browser_lane=false"
             echo "needs_heavy=$needs_heavy"
+            echo "train_branch=$train_branch"
+            # The memory job runs on the train branch alone, never on the merge push.
+            echo "run_memory=$train_branch"
           } >> "$GITHUB_OUTPUT"
 
   check:
@@ -1137,8 +1155,94 @@ jobs:
             e2e/**/tai-e2e-studio-*/
           if-no-files-found: ignore
 
-  # Single required check. Fails if any needed job failed or was cancelled;
-  # skipped members do not fail it.
+  # Memory of one serve under a repeated jq load: boots a two-worker serve with the chain
+  # extension on the jemalloc allocator environment, runs the same 64 jq programs eight times
+  # over a ~20 MiB document each, with plain document calls on executor threads beside every
+  # batch, samples the serve's process tree idle before the load, between batches and idle
+  # after it, and fails when jemalloc is not mapped in the serve or PYTHONMALLOC=malloc is not
+  # in its environment, when a compute-pool child reaches 360 MiB, when the idle serve ends
+  # above 1.5x its size after the first pass or still holds half or more of what the load grew
+  # it above its idle baseline, when the children were never replaced, or when a call was lost.
+  # Runs on the release-please train branch — the PR tree that gets tagged and published on
+  # merge — and on the `memory` dispatch lane; it needs the Redis and Postgres service
+  # containers below and the `libjemalloc2` package it installs, no secret and no variable.
+  e2e-memory:
+    needs: [reuse, changes]
+    if: ${{ needs.reuse.outputs.should_skip != 'true' && needs.changes.outputs.run_memory == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 3s --health-retries 20
+    env:
+      TAI_E2E_REDIS_URL: redis://localhost:6379
+      TAI_E2E_PG_HOST: localhost
+      TAI_E2E_PG_PASSWORD: postgres
+      TAI_E2E_KEEP_STACKS: "1"
+      TAI_E2E_BACKEND: arq
+      TAI_E2E_IDENTITY: redis
+      TAI_E2E_STORAGE: local
+      TAI_E2E_MEMORY: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - run: uv python install 3.13
+      - name: Sync the locked venv
+        run: uv sync --locked --package tai42-e2e
+      - name: Install the jemalloc allocator
+        # The memory stack's processes run on the allocator environment a deployment sets,
+        # LD_PRELOAD=libjemalloc.so.2, MALLOC_CONF=background_thread:true and
+        # PYTHONMALLOC=malloc, from the stack's manifest env; the suite fails when the library
+        # is not mapped in the serve.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libjemalloc2
+      - name: Run the memory suite
+        # The test's own timeout marker bounds the load, so no --timeout here; the INFO
+        # log level shows the figures the suite logs (every sample with the workers' thread
+        # counts, each idle wait's series, the baseline, warm-up, peak and end totals, the
+        # largest child, the elapsed time).
+        working-directory: e2e
+        run: uv run --no-sync pytest -x -q --basetemp=stacks-tmp -o log_cli=true -o log_cli_level=INFO --junitxml=junit-memory.xml tests/memory
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-memory-junit
+          path: e2e/junit*.xml
+          if-no-files-found: error
+      - name: Summarize the JUnit report
+        if: ${{ !cancelled() }}
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
+        with:
+          paths: e2e/junit*.xml
+      - name: Upload diagnostics
+        # The stack's per-process logs, kept past teardown by KEEP_STACKS under the
+        # pinned temp root (the e2e job's diagnostics step explains the globs).
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-memory-diagnostics
+          path: |
+            e2e/stacks-tmp/**/logs/
+            !e2e/stacks-tmp/*current/**
+          if-no-files-found: ignore
+
   # Behavioural gate for the release train: boot the PREVIOUSLY PUBLISHED consumer
   # distributions against the candidate tree and fail a non-major release that
   # breaks any consumer's boot — the class the textual API-diff gate cannot see (a
@@ -1150,7 +1254,7 @@ jobs:
     needs: [reuse, changes]
     if: >-
       needs.reuse.outputs.should_skip != 'true' &&
-      (startsWith(github.head_ref, 'release-please--') || startsWith(github.ref_name, 'release-please--'))
+      needs.changes.outputs.train_branch == 'true'
     runs-on: ubuntu-latest
     # Coarse backstop behind the gate's own per-step timeouts: a stalled resolve, install or
     # boot fails loudly in minutes, never runs the job to the host's cancellation limit.
@@ -1236,7 +1340,7 @@ jobs:
     needs: [reuse, changes]
     if: >-
       needs.reuse.outputs.should_skip != 'true' &&
-      (startsWith(github.head_ref, 'release-please--') || startsWith(github.ref_name, 'release-please--'))
+      needs.changes.outputs.train_branch == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -1308,8 +1412,10 @@ jobs:
           set -euo pipefail
           uv run --no-project --python 3.13 --with pyyaml --with-editable ./core/cli python scripts/consumer_boot_gate.py --consumer-req "$REQ"
 
+  # Single required check. Fails if any needed job failed or was cancelled;
+  # skipped members do not fail it.
   ci-ok:
-    needs: [reuse, changes, check, process-namespace, plugin-frontend, fleet, stable-resolution, first-party-npm-majors, e2e, ui-e2e, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
+    needs: [reuse, changes, check, process-namespace, plugin-frontend, fleet, stable-resolution, first-party-npm-majors, e2e, ui-e2e, e2e-memory, consumer-boot-gate, consumer-boot-gate-plan, consumer-boot-gate-first-party]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15

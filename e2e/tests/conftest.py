@@ -55,6 +55,7 @@ from tai42_e2e.manifests import (
     build_extensions_stack,
     build_media_bridge_no_store_stack,
     build_media_bridge_stack,
+    build_memory_stack,
     build_minimal_stack,
     build_monitoring_stack,
     build_off_stack,
@@ -97,8 +98,8 @@ from tai42_e2e.topology import StackConfig
 from tai42_e2e.variants import Variants
 from tai42_e2e_fixtures.oauth_mcp_server import OAuthMcpServer
 
-# The monitoring / marketplace / fleet suites only collect when their opt-in gate is
-# on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
+# The monitoring / marketplace / fleet / docker-sandbox / memory suites only collect
+# when their opt-in gate is on. ``infra`` and ``fresh_stack`` come from the pytest11 plugin.
 _gate = HarnessSettings()
 collect_ignore_glob: list[str] = gated_collect_ignore(
     {
@@ -106,6 +107,7 @@ collect_ignore_glob: list[str] = gated_collect_ignore(
         "marketplace": _gate.marketplace,
         "fleet": _gate.fleet,
         "sandbox_docker": _gate.sandbox_docker,
+        "memory": _gate.memory,
     }
 )
 
@@ -935,6 +937,14 @@ def extensions_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> 
     extensions with the fixture monitoring backend — the tool-extension coverage
     home."""
     yield from _boot(infra, tmp_path_factory.mktemp("extensions"), build_extensions_stack)
+
+
+@pytest.fixture(scope="module")
+def memory_stack(infra: Infra, tmp_path_factory: pytest.TempPathFactory) -> Iterator[TaiStack]:
+    """MULTIWORKER(2) stack with the chain extension over the document probe and its
+    compute-pool children replaced every ``MEMORY_WORKER_MAX_TASKS`` jobs, every process on
+    the deployment's allocator environment — the memory suite's home."""
+    yield from _boot(infra, tmp_path_factory.mktemp("memory"), build_memory_stack)
 
 
 @pytest.fixture(scope="module")
