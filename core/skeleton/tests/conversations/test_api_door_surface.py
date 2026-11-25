@@ -106,13 +106,13 @@ def _post(client: TestClient, path: str = _PATH, body=None):
 # -- the 400 body guards -------------------------------------------------------
 
 
-def test_a_reload_locked_door_rejects_before_the_turn(monkeypatch):
+def test_a_door_rejects_during_a_reload_before_the_turn(monkeypatch):
     engine = _Engine()
     router = _router()
     monkeypatch.setattr(conversations_package, "submit_api_message", engine)
 
-    class _Locked:
-        locked = True
+    class _Reloading:
+        reloading = True
 
         def reject_response(self):
             from starlette.responses import JSONResponse
@@ -122,7 +122,7 @@ def test_a_reload_locked_door_rejects_before_the_turn(monkeypatch):
     # The door is declared ``reload_gated``; the route surface's wrapper reads the gate.
     from tai42_skeleton.app import http as app_http
 
-    monkeypatch.setattr(app_http, "reload_gate", _Locked())
+    monkeypatch.setattr(app_http, "reload_gate", _Reloading())
     routes = [Route("/api/conversations/{route_name}/messages", router.send_conversation_message, methods=["POST"])]
     response = TestClient(Starlette(routes=routes)).post(_PATH, json={"external_user_id": "u", "text": "hi"})
     assert response.status_code == 503

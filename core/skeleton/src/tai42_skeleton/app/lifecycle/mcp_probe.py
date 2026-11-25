@@ -159,7 +159,7 @@ class McpProbeMixin(LifecycleState):
         """The hook that applies the outcome of a start ``_probe_mcp`` stopped waiting for.
 
         Called on the start's loop when the start ends; it schedules the outcome onto the
-        serving loop, where, under the reload gate, :meth:`_apply_late_outcome`
+        serving loop, where, as a reload body, :meth:`_apply_late_outcome`
         applies it only when the title's ``starting`` record waits on that very start.
         Two starts of one title overlap only across serving generations or configs (a
         rebuild, or an edit, while a late start is pending); the record waits on the one
@@ -185,13 +185,14 @@ class McpProbeMixin(LifecycleState):
         return apply
 
     async def _apply_late_outcome(self, config: TaiMCPConfig, start: StartId, outcome: Any) -> None:
-        """On the serving loop, under the reload gate: apply the late outcome of ``start``.
+        """On the serving loop, as a reload body (``reload_gate.run``): apply the late outcome of ``start``.
 
         It applies, through :meth:`_apply_probe_outcome`, only when the title's failed
         record waits on ``start``; otherwise it is logged with the reason and dropped.
         """
-        async with reload_gate.synchronized():
-            result = await self._apply_probe_outcome(config.title, config, outcome, awaited=start)
+        result = await reload_gate.run(
+            lambda: self._apply_probe_outcome(config.title, config, outcome, awaited=start), reimports=False
+        )
         if result is not None:
             logger.info("MCP server '%s' late start applied: %s", config.title, result["status"])
 

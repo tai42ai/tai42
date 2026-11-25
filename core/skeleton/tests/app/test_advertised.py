@@ -147,7 +147,7 @@ async def test_a_provider_missing_during_a_reload_contributes_nothing(monkeypatc
     _chain(monkeypatch, {"declaring": _DeclaringProvider(("https://a.example",))}, public_url=PUBLIC_URL)
     await probe_identity_provider()
     app._serving_core.active_auth_providers.pop("declaring")
-    monkeypatch.setattr(type(reload_gate), "locked", property(lambda _self: True))
+    monkeypatch.setattr(type(reload_gate), "reloading", property(lambda _self: True))
     assert advertised_authorization_servers() == ()
 
 

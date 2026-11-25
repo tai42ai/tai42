@@ -683,12 +683,12 @@ async def test_install_bad_ref_is_400(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 400
 
 
-async def test_install_reload_gate_locked_is_503_reloading(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_install_during_a_reload_is_503_reloading(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _never(ref, version):  # pragma: no cover - the gate rejects first
-        raise AssertionError("the operation must not run while the gate is locked")
+        raise AssertionError("the operation must not run while a reload body holds the gate")
 
     _use_installer(monkeypatch, install=_never)
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         resp = await router.marketplace_install(_post({"ref": "tai42/toolbox"}))
     assert resp.status_code == 503
     body = _data(resp)
@@ -942,12 +942,12 @@ async def test_upgrade_all_busy_fleet_lock_is_retriable_503(monkeypatch: pytest.
     assert "in progress" in _data(resp)["error"]
 
 
-async def test_upgrade_all_reload_gate_locked_is_503_reloading(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_upgrade_all_during_a_reload_is_503_reloading(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _never(ref, version):  # pragma: no cover - the gate rejects first
-        raise AssertionError("the operation must not run while the gate is locked")
+        raise AssertionError("the operation must not run while a reload body holds the gate")
 
     _use_installer(monkeypatch, install=_never)
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         resp = await router.marketplace_upgrade_all(_post({}))
     assert resp.status_code == 503
     assert _data(resp)["reloading"] is True

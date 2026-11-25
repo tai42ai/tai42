@@ -59,33 +59,41 @@ class McpReprobeMixin(LifecycleState):
         }
 
     async def _probe_and_apply_failed(self, snapshot: dict[str, TaiMCPConfig]) -> tuple[list[dict[str, Any]], set[str]]:
-        """Re-probe the snapshotted failed MCP servers OFF the reload gate, then bind the recovered ones back UNDER it.
+        """Re-probe the snapshotted failed MCP servers OFF the reload gate; bind the recovered ones as a reload body.
 
         ``snapshot`` is the ``{title: config}`` a reprobe pass captured under the
         gate (:meth:`_reprobe_snapshot`), so each title's record waited on no start. The
         probe is a network read that mutates no shared state, so it runs off the gate and
         holds nothing while it waits; it waits the whole start budget (``mcp_probe_timeout``),
         exactly as boot and the ``reload_failed_mcps`` door do.
-        The gate is re-acquired only to apply, each outcome through
-        :meth:`_apply_probe_outcome`, which re-verifies the title STILL failed, its record
+        The gate is re-acquired only to apply, as a reload body (``reload_gate.run``, so gated doors
+        refuse while it rebinds), each outcome through :meth:`_apply_probe_outcome`, which
+        re-verifies the title STILL failed, its record
         STILL waiting on no start, and STILL in the manifest with the probed config: a
         concurrent admin reload/deregister/edit may have cleared, removed or changed it while
         probing, or a newer start recorded it ``starting``, and a stale outcome must not be
-        applied. Returns the per-title results and the gate-consistent still-failed set.
+        applied. An empty snapshot applies nothing, so it only reads the still-failed set under
+        the gate and runs no reload body. Returns the per-title results and the gate-consistent
+        still-failed set.
         """
+        if not snapshot:
+            async with reload_gate.synchronized():
+                return [], set(self._failed_mcps)
         titles = list(snapshot)
         probes = await asyncio.gather(*(self._probe_mcp(snapshot[t]) for t in titles), return_exceptions=True)
-        out: list[dict[str, Any]] = []
+
         # Every read/write of ``_failed_mcps`` (and the bind it drives) happens under
-        # the reload gate; every reload body holds the same lock (``reload_gate.run``),
-        # so the re-verify and apply below cannot race a concurrent mutation.
-        async with reload_gate.synchronized():
+        # the reload gate; every reload body and this apply hold the same lock
+        # (``reload_gate.run``), so the re-verify and apply cannot race a concurrent mutation.
+        async def _apply() -> tuple[list[dict[str, Any]], set[str]]:
+            out: list[dict[str, Any]] = []
             for title, probe in zip(titles, probes, strict=True):
                 result = await self._apply_probe_outcome(title, snapshot[title], probe, awaited=None)
                 if result is not None:
                     out.append(result)
-            still_failed = set(self._failed_mcps)
-        return out, still_failed
+            return out, set(self._failed_mcps)
+
+        return await reload_gate.run(_apply, reimports=False)
 
     async def _reprobe_failed_titles(self, titles: Iterable[str]) -> list[dict[str, Any]]:
         """Re-probe, now, those of ``titles`` failed, in the manifest and not starting; bind the recovered ones.
@@ -138,11 +146,11 @@ class McpReprobeMixin(LifecycleState):
         Each pass sleeps the current interval, then — only when a server is
         currently failed — SNAPSHOTS the failed titles not still starting under the reload
         gate (:meth:`_reprobe_snapshot`), PROBES
-        them off the gate on the whole start budget, and re-acquires the gate to
-        rebind the recovered tools and clear them from the failed set, logging the
-        outcome at INFO. The gate wraps only the brief snapshot and apply, never the
-        probe: holding it across the network probe would stall every reload-gated
-        write for up to the probe timeout each pass. The interval starts at
+        them off the gate on the whole start budget, and re-acquires the gate as a
+        reload body to rebind the recovered tools and clear them from the failed set,
+        logging the outcome at INFO. The gate wraps only the brief snapshot and apply,
+        never the probe: holding it across the network probe would hold every reload
+        body back for up to the probe timeout each pass. The interval starts at
         ``mcp_reprobe_initial_seconds``, doubles (capped at
         ``mcp_reprobe_max_seconds``) after a pass where every probed server stayed
         down, stays as it is after a pass that probed nothing (every failed server
@@ -182,8 +190,8 @@ class McpReprobeMixin(LifecycleState):
                         continue
                     newly_appeared = not current_failed <= known_failed
                     snapshot = self._reprobe_snapshot(current_failed, mcp_map)
-                # Probe off the gate, then re-acquire it to bind the recovered
-                # servers and read the settled failed set (both gate-consistent).
+                # Probe off the gate, then re-acquire it as a reload body to bind the
+                # recovered servers and read the settled failed set (both gate-consistent).
                 results, still_failed = await self._probe_and_apply_failed(snapshot)
                 recovered = sorted(r["title"] for r in results if r.get("status") == "ok")
                 logger.info(

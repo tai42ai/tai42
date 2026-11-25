@@ -98,13 +98,13 @@ def _request(received: list[str]) -> Request:
     return Request({"type": "http", "method": "POST", "path": "/api/synthetic/change", "headers": []}, receive)
 
 
-def _gate(*, locked: bool) -> SimpleNamespace:
+def _gate(*, reloading: bool) -> SimpleNamespace:
     def reject() -> Response:
         from tai42_skeleton.app.reload_gate import reload_gate
 
         return reload_gate.reject_response()
 
-    return SimpleNamespace(locked=locked, reject_response=reject)
+    return SimpleNamespace(reloading=reloading, reject_response=reject)
 
 
 async def test_a_route_holding_the_writer_exit_on_a_leaving_worker_answers_the_leaving_503_before_its_handler(
@@ -173,7 +173,7 @@ async def test_the_reload_gate_answers_before_the_hold(monkeypatch: pytest.Monke
     held_while_running: list[str | None] = []
     handler = _door(bus, held_while_running)
     _fast, returned = _register(monkeypatch, handler, holds_writer_exit=True, reload_gated=True)
-    monkeypatch.setattr(app_http, "reload_gate", _gate(locked=True))
+    monkeypatch.setattr(app_http, "reload_gate", _gate(reloading=True))
 
     with writer_exit_scope() as exits:
         response = await returned(_request([]))

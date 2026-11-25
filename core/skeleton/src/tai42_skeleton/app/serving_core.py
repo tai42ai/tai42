@@ -172,7 +172,7 @@ class ServingCore:
         self._fast_mcp.add_middleware(SessionCallAdmissionMiddleware())
         self._fast_mcp.add_middleware(SessionTrackingMiddleware(self._session_registry))
         # A session ``tools/call`` is a run surface too: reject it with the same
-        # retriable "reloading" error while the reload gate is held.
+        # retriable "reloading" error while a reload body holds the reload gate.
         self._fast_mcp.add_middleware(ReloadRejectionMiddleware(reload_gate))
         # Tool-edge authorization for projected operations, on the main server AND (in
         # ``_build_sub_app``) every sub-MCP mount.

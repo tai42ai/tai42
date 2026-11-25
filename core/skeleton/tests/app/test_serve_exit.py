@@ -481,7 +481,7 @@ async def test_the_drain_lets_a_reload_in_progress_turn_over_before_ending_the_s
     turn_over = asyncio.Event()
 
     async def reload() -> None:
-        async with reload_gate.synchronized():
+        async with reload_gate.driving():
             held.set()
             await turn_over.wait()
 

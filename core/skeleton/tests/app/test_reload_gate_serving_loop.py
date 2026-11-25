@@ -32,13 +32,13 @@ def test_the_body_runs_on_the_serving_loop_and_its_result_returns_to_the_job(ser
 
     async def body() -> dict[str, str]:
         seen["loop"] = asyncio.get_running_loop()
-        seen["locked"] = gate.locked
+        seen["reloading"] = gate.reloading
         return {"status": "ok"}
 
     with job_loop() as job:
         assert job.run(gate.run(body, reimports=False)) == {"status": "ok"}
-    assert seen == {"loop": serving, "locked": True}
-    assert not gate.locked
+    assert seen == {"loop": serving, "reloading": True}
+    assert not gate.reloading
 
 
 def test_the_bodys_failure_raises_in_the_job(serving) -> None:
@@ -49,7 +49,7 @@ def test_the_bodys_failure_raises_in_the_job(serving) -> None:
 
     with job_loop() as job, pytest.raises(RuntimeError, match=r"^reload blew up$"):
         job.run(gate.run(body, reimports=True))
-    assert not gate.locked
+    assert not gate.reloading
     assert not fork_gate.blocked
 
 
@@ -106,7 +106,7 @@ def test_a_cancelled_caller_holds_the_lock_until_the_body_has_unwound_on_the_ser
         waiting = asyncio.ensure_future(gate.run(second, reimports=False))
         assert not await asyncio.to_thread(second_ran.wait, 0.5)
         assert not unwinding.done()
-        assert gate.locked
+        assert gate.reloading
         assert fork_gate.blocked
         finish_cleanup.set()
         with pytest.raises(asyncio.CancelledError):
@@ -116,7 +116,7 @@ def test_a_cancelled_caller_holds_the_lock_until_the_body_has_unwound_on_the_ser
     with job_loop() as job:
         job.run(caller())
     assert order == ["first unwound", "second ran"]
-    assert not gate.locked
+    assert not gate.reloading
     assert not fork_gate.blocked
 
 
@@ -161,7 +161,7 @@ def test_a_caller_cancelled_before_the_body_starts_returns_once_the_body_is_canc
     with job_loop() as job:
         job.run(caller())
     assert ran == []
-    assert not gate.locked
+    assert not gate.reloading
 
 
 def test_a_body_that_fails_while_unwinding_from_a_cancel_raises_its_failure_in_the_job(serving) -> None:
@@ -184,7 +184,7 @@ def test_a_body_that_fails_while_unwinding_from_a_cancel_raises_its_failure_in_t
 
     with job_loop() as job:
         job.run(caller())
-    assert not gate.locked
+    assert not gate.reloading
 
 
 def test_the_body_runs_in_the_callers_context(serving) -> None:
@@ -239,4 +239,4 @@ def test_a_serving_loop_bound_but_not_running_raises(monkeypatch: pytest.MonkeyP
         stopped.close()
     assert str(raised.value) == "the serving loop is bound but not running, so the work handed to it cannot run"
     assert ran == []
-    assert not gate.locked
+    assert not gate.reloading

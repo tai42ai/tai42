@@ -608,7 +608,7 @@ def test_post_invalid_manifest_after_edit_400(cfg, monkeypatch):
 def test_post_rejected_while_reload_gate_held(cfg):
     async def run():
         # The apply is a gated route: a reload holding the gate rejects it 503.
-        async with _running(cfg, _single()), reload_gate.synchronized():
+        async with _running(cfg, _single()), reload_gate.driving():
             resp = await _post("shout", [["marka"]])
             assert resp.status_code == 503
 

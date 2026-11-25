@@ -1,7 +1,7 @@
 """The auth path is reload-gate-aware.
 
 When identity-provider resolution finds an EMPTY registry (a reload's
-reset->reimport window) WHILE the reload gate is held, an authenticated request
+reset->reimport window) WHILE a reload body holds the gate, an authenticated request
 gets the SAME retriable ``reloading`` envelope the run surface gives — never a
 spurious 401. Outside a reload a missing provider stays a loud fail-closed 401,
 and a genuinely invalid key (a resolved provider that rejects it) stays a 401 in
@@ -52,13 +52,13 @@ def _backend(verifier, settings: AccessControlSettings | None = None) -> AccessC
 
 
 async def test_provider_missing_during_reload_returns_retriable_reloading():
-    # Gate held + empty registry: the authenticated request is answered with the
+    # A reload body holds the gate + empty registry: the authenticated request is answered with the
     # SAME reloading envelope dispatch uses (503, ``reloading: true``, Retry-After),
     # not a 401 — so the client's retry_on_reloading path polls past the window.
     backend = _backend(_ProviderMissingVerifier())
     conn = _conn({"Authorization": "Bearer sk-whatever"})
 
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         with pytest.raises(ReloadInProgressError) as excinfo:
             await backend.authenticate(conn)
 
@@ -84,7 +84,7 @@ async def test_provider_missing_outside_reload_stays_loud_401(caplog):
     backend = _backend(_ProviderMissingVerifier())
     conn = _conn({"Authorization": "Bearer sk-x"})
 
-    assert reload_gate.locked is False
+    assert reload_gate.reloading is False
     with caplog.at_level("ERROR"), pytest.raises(AuthenticationError) as excinfo:
         await backend.authenticate(conn)
 
@@ -98,11 +98,11 @@ async def test_provider_missing_outside_reload_stays_loud_401(caplog):
 
 async def test_invalid_key_during_reload_still_401():
     # The classes stay distinct: a RESOLVED provider that rejects the key is not the
-    # reload transient, so a bad key is a 401 even while the gate is held.
+    # reload transient, so a bad key is a 401 even while a reload body holds the gate.
     backend = _backend(_RejectingVerifier())
     conn = _conn({"Authorization": "Bearer sk-bad"})
 
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         with pytest.raises(AuthenticationError) as excinfo:
             await backend.authenticate(conn)
 
@@ -117,7 +117,7 @@ async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app)
     # End-to-end through the REAL AuthAdapter: clearing the registry models the
     # reset->reimport window, the adapter's factory wraps the registry-miss KeyError
     # into IdentityProviderUnavailableError, the verifier propagates it, and the
-    # backend converts it to the retriable answer while the gate is held. The autouse
+    # backend converts it to the retriable answer while a reload body holds the gate. The autouse
     # registry-isolation fixture restores the "redis" registration afterwards.
     from tai42_kit.access_control import registry
 
@@ -127,7 +127,7 @@ async def test_real_adapter_empty_registry_during_reload_is_retriable(bound_app)
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)
     conn = _conn({"X-Api-Key": "sk-x"})
 
-    async with reload_gate.synchronized():
+    async with reload_gate.driving():
         with pytest.raises(ReloadInProgressError):
             await backend.authenticate(conn)
 
@@ -142,7 +142,7 @@ async def test_real_adapter_empty_registry_outside_reload_denies_401():
     backend = AccessControlAuthBackend(adapter._internal_verifier, settings)
     conn = _conn({"X-Api-Key": "sk-x"})
 
-    assert reload_gate.locked is False
+    assert reload_gate.reloading is False
     with pytest.raises(AuthenticationError) as excinfo:
         await backend.authenticate(conn)
     assert not isinstance(excinfo.value, ReloadInProgressError)
