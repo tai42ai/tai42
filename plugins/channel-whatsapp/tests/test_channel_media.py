@@ -177,8 +177,8 @@ async def test_deliver_media_reserves_after_the_media_send(fake_redis: FakeRedis
     )
 
     kinds = [kind for kind, _ in fake_redis.events]
-    # image send, then reserve, then the interactive question send.
-    assert kinds == ["http_post", "redis_set", "http_post"]
+    # image send, the hold for its delivery, then reserve, then the interactive question send.
+    assert kinds == ["http_post", "await_delivery", "redis_set", "http_post"]
     assert fake_httpx.calls[1]["json"]["interactive"]["type"] == "button"
 
 

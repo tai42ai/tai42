@@ -1,4 +1,6 @@
-"""The answer/record store — keyspaces 1, 2, 3, 6, 7, 8, 9 and the send-record keys of the conversation bridge.
+"""The answer/record store of the conversation bridge.
+
+It holds keyspaces 1, 2, 3, 6, 7, 8, 9, the outbound-order keys and the send-record keys.
 
 All transient runtime state (NOT a backup section) and all Redis-backed:
 
@@ -29,6 +31,14 @@ All transient runtime state (NOT a backup section) and all Redis-backed:
 9. Owed first-contact greeting: ``conversations:overlap:greeting:{thread_id}`` → the rendered
    greeting a thread still owes, parked when it is minted and burned by the first turn that
    delivers a reply, so a greeting whose minting turn was superseded rides the successor turn.
+
+The outbound-order keys:
+
+- Receipt flag: ``conversations:receipt:{channel}:{provider_message_id}`` → the receipt status and
+  the provider's error detail, written by the receipt door before the id resolves.
+- Last-outbound marker: ``conversations:order:{sha256}`` → the last provider id sent to one
+  participant conversation and its send time (the hash folds the channel, our identity and the
+  participant address), which the next send there holds for.
 
 The send-record keys:
 
@@ -71,6 +81,7 @@ from tai42_skeleton.conversations.record_dedupe import RecordDedupeMixin
 from tai42_skeleton.conversations.record_delivery_state import RecordDeliveryMixin
 from tai42_skeleton.conversations.record_greeting import RecordGreetingMixin
 from tai42_skeleton.conversations.record_index import RecordIndexMixin
+from tai42_skeleton.conversations.record_outbound_order import RecordOutboundOrderMixin
 from tai42_skeleton.conversations.record_pages import PendingWork, ThreadPage, ThreadSummary, TranscriptPage
 from tai42_skeleton.conversations.record_prune import PRUNE_START, PruneCursor, RecordPruneMixin
 from tai42_skeleton.conversations.record_query import RecordQueryMixin
@@ -119,12 +130,13 @@ class ConversationRecordStore(
     RecordQueryMixin,
     RecordPruneMixin,
     RecordGreetingMixin,
+    RecordOutboundOrderMixin,
 ):
     """The Redis-backed answer/record store, one persistence concern per mixin.
 
-    It holds keyspaces 1, 2, 3, 6, 7, 8, 9 and the send-record keys. Construction refuses with a
-    loud 501 without the redis conversations backend — nothing here may be persisted to state that
-    vanishes with the process.
+    It holds keyspaces 1, 2, 3, 6, 7, 8, 9, the outbound-order keys and the send-record keys.
+    Construction refuses with a loud 501 without the redis conversations backend — nothing here may
+    be persisted to state that vanishes with the process.
     """
 
     def __init__(self, settings: ConversationsSettings) -> None:

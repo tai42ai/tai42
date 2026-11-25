@@ -12,7 +12,7 @@
   "packages": {
     "core/contract": {
       "package-name": "tai42-contract",
-      "release-as": "31.2.0",
+      "release-as": "31.3.0",
       "component": "tai42-contract",
       "skip-changelog": true,
       "extra-files": [
@@ -200,6 +200,7 @@
     },
     "plugins/channel-twilio": {
       "package-name": "tai42-channel-twilio",
+      "release-as": "10.1.0",
       "component": "tai42-channel-twilio",
       "skip-changelog": true,
       "extra-files": [
@@ -245,6 +246,7 @@
     },
     "plugins/channel-whatsapp": {
       "package-name": "tai42-channel-whatsapp",
+      "release-as": "18.1.0",
       "component": "tai42-channel-whatsapp",
       "skip-changelog": true,
       "extra-files": [
@@ -598,6 +600,7 @@
     },
     "e2e": {
       "package-name": "tai42-e2e",
+      "release-as": "32.2.0",
       "component": "tai42-e2e",
       "skip-changelog": true,
       "exclude-paths": [

@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 
 import pytest
 from tai42_contract.channels import ChannelDeliveryError, SendOutcome
-from tai42_contract.conversations import Person, TargetConversationConfig
+from tai42_contract.conversations import DeliveryReceipt, Person, TargetConversationConfig
 
 from tai42_skeleton.channels import notify as notify_module
 from tai42_skeleton.channels.notify import notify_user
@@ -200,6 +200,24 @@ async def test_forgetting_a_thread_leaves_no_key_naming_its_records(door, lua_en
         assert (await ops.delete_conversation_thread("line", _THREAD))["removed"] == len(ids)
 
     await _assert_forgotten(lua_env, ids, thread=_THREAD, routes=["line"])
+
+
+@pytest.mark.parametrize("door", ["drop_thread", "delete_conversation_thread"])
+async def test_forgetting_a_thread_takes_the_receipt_flags_its_records_sent_ids_kept(door, lua_env, checkpoint_saver):
+    await lua_env.manager.put_route(_channel_route())
+    await _bridge_reply(lua_env, "reply-1", ["r-1", "r-2"], delivery_status=DeliveryStatus.PENDING_DELIVERY)
+    # A receipt landing while the reply is still being sent keeps its flag for the answer retention.
+    await delivery_module.record_delivery_status("twilio", "r-1", DeliveryReceipt.FAILED, errors=[{"code": 41}])
+    flag = lua_env.store.settings.keyspace.receipt_flag_key("twilio", "r-1")
+    assert await lua_env.redis.exists(flag) == 1
+
+    if door == "drop_thread":
+        assert await lua_env.store.drop_thread("line", _THREAD) == 1
+    else:
+        assert (await ops.delete_conversation_thread("line", _THREAD))["removed"] == 1
+
+    prefix = lua_env.store.settings.keyspace.receipt_flag_key_prefix
+    assert [key async for key in lua_env.redis.scan_iter(match=f"{prefix}*")] == []
 
 
 async def _linked_person(lua_env: LuaEnv, *routes: str) -> Person:

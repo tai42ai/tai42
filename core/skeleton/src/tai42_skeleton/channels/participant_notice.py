@@ -29,6 +29,7 @@ async def send_participant_notice(channel: Channel, channel_id: str, notificatio
 
     await recorded_send(
         channel=channel_id,
+        channel_obj=channel,
         address=channel.resolve_address(notification.recipient, notification.sender_identity),
         parts=[notification_part(notification)],
         sent_by="notice",

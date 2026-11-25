@@ -444,16 +444,25 @@ WhatsApp reports delivery asynchronously: a send returns `2xx` with a `wamid`, a
 a later `statuses` webhook carries `sent`/`delivered`/`read`/`failed`. The same
 `POST` endpoint records those receipts through the interactions facet — `failed`
 (e.g. a message outside the 24-hour session window, error 131047) marks the
-answer failed loudly; `sent`/`delivered` confirm it; `read` is informational and
-ignored.
+answer failed loudly; `delivered` confirms it, and so does `read` (Meta sends no
+`delivered` for a message read at once); `sent` only means Meta's servers took the
+message and is ignored.
+
+Meta does not keep the order of a series of sends, so the channel declares that it
+confirms delivery by receipt: the platform holds the next send to the same participant
+until the previous one is reported `delivered` or `read`, at most
+`CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS` (then it sends with a `WARNING`). A
+notification or question the channel sends as several messages (a header, the body, a
+location, each media item) waits the same way between them; a `failed` receipt for the
+previous message stops the rest and raises.
 
 A `wamid` no conversation record owns is not a dead end: it may be a
 **`notify_user` send** made outside any conversation route. The webhook then
 resolves the `wamid` through the send-outcome receipt index and, on a hit, posts a
 `delivery_receipt` event onto the send's originating monitoring trace, nested under
 its send span — `ERROR` for a `failed` receipt (carrying the provider `errors`),
-informational otherwise. This is observability only: it annotates the originating
-trace, never re-sending or failing the run. Only a genuine miss — neither the bridge
+informational otherwise. The trace event annotates the originating trace and never
+re-sends or fails the run. Only a genuine miss — neither the bridge
 nor any such send owns the `wamid` — keeps the untracked-message log; either way the
 status is acknowledged, never retried.
 

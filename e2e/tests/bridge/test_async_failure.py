@@ -64,6 +64,8 @@ async def test_twilio_failed_status_flips_the_record(bridge: BridgeHarness, uniq
     port = bridge.stack.port_b
 
     answer = uniq("l9-tw")
+    # The test posts this send's status itself; an automatic ``delivered`` would settle it first.
+    bridge.fake_twilio.receipts.withhold(answer)
     script_reply(bridge.llm_stub, f"tw {answer}")
     inbound = bridge.twilio_inbound(our_identity=identity, client=client, text="hello", port=port)
     assert (await post_inbound(bridge.stack, TWILIO_INBOUND_PATH, inbound, port=port)).status_code == 204
@@ -97,6 +99,8 @@ async def test_whatsapp_failed_status_flips_the_record(bridge: BridgeHarness, un
     port = bridge.stack.port_b
 
     answer = uniq("l9-wa")
+    # The test posts this send's status itself; an automatic ``delivered`` would settle it first.
+    bridge.fake_whatsapp.receipts.withhold(answer)
     script_reply(bridge.llm_stub, f"wa {answer}")
     inbound = bridge.whatsapp_inbound(phone_number_id=identity, wa_id=client, text="hello")
     assert (await post_inbound(bridge.stack, WHATSAPP_INBOUND_PATH, inbound, port=port)).status_code == 200

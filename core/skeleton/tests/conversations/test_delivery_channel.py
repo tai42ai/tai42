@@ -436,7 +436,7 @@ async def test_a_refusal_notice_that_fails_is_logged_and_leaves_the_record_faile
     _wire_channel(monkeypatch, channel)
     await create_record(store, _record("m-huge-noticefail", "x" * (10 * _CHUNK_CHARS)))
 
-    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.channel_refusal"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-huge-noticefail"), "worker-1")
 
     assert (await _get(store, "m-huge-noticefail")).delivery_status is DeliveryStatus.FAILED
@@ -573,7 +573,7 @@ async def test_a_refusal_notice_falls_back_and_logs_when_the_route_lookup_faults
     _wire_channel(monkeypatch, channel)
     await create_record(store, _record("m-routefault", "x" * (10 * _CHUNK_CHARS)))
 
-    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.channel_refusal"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-routefault"), "worker-1")
 
     assert (await _get(store, "m-routefault")).delivery_status is DeliveryStatus.FAILED
@@ -1296,7 +1296,7 @@ async def test_a_form_part_outside_the_channel_subset_is_refused_before_any_send
     channel = FormFakeChannel()
     _wire_channel(monkeypatch, channel)
 
-    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.channel_refusal"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-undrawable"), "worker-1")
 
     await _assert_refused_before_any_send(store, channel, "m-undrawable", caplog, "part 2", "'address'")
@@ -1312,7 +1312,7 @@ async def test_a_form_part_over_the_channel_hook_limit_is_refused_before_any_sen
     channel = FormFakeChannel(form_hook=_question_limit(10))
     _wire_channel(monkeypatch, channel)
 
-    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.channel_refusal"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-hooklimit"), "worker-1")
 
     await _assert_refused_before_any_send(
@@ -1398,7 +1398,7 @@ async def test_a_template_part_the_channel_cannot_map_is_refused_before_any_send
     channel = FormFakeChannel(template_hook=_refuse_reject_parameter)
     _wire_channel(monkeypatch, channel)
 
-    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.delivery_channel"):
+    with caplog.at_level(logging.ERROR, logger="tai42_skeleton.conversations.channel_refusal"):
         await delivery_channel_module._deliver_channel(store, await _get(store, "m-badtemplate"), "worker-1")
 
     await _assert_refused_before_any_send(

@@ -128,3 +128,38 @@ def test_the_send_record_keyspaces():
             s.keyspace.route_sending_key(blank)
     with pytest.raises(ValueError, match="route_name must not contain ':'"):
         s.keyspace.route_sending_key("a:b")
+
+
+def test_the_outbound_order_keyspaces():
+    import hashlib
+    import json
+
+    import pytest
+
+    s = ConversationsSettings()
+    # A receipt flag is channel-qualified, the provider id terminal.
+    assert s.keyspace.receipt_flag_key("twilio", "SM:1") == "conversations:receipt:twilio:SM:1"
+    # A record delete builds a sent id's flag key from its reverse-index key by swapping the prefixes.
+    prefixes = json.loads(s.keyspace.receipt_flag_prefixes())
+    assert prefixes == {"outbound": s.keyspace.outbound_index_key_prefix, "receipt": s.keyspace.receipt_flag_key_prefix}
+    outbound = s.keyspace.outbound_index_key("twilio", "SM:1")
+    assert prefixes["receipt"] + outbound.removeprefix(prefixes["outbound"]) == s.keyspace.receipt_flag_key(
+        "twilio", "SM:1"
+    )
+    # The participant conversation folds into ONE opaque sha256 terminal segment: an identity or an
+    # address may carry ``:``.
+    order = s.keyspace.outbound_order_key("twilio", "whatsapp:+1", "+2")
+    digest = hashlib.sha256(json.dumps(["twilio", "whatsapp:+1", "+2"], separators=(",", ":")).encode())
+    assert order == f"conversations:order:{digest.hexdigest()}"
+    assert s.keyspace.outbound_order_key("twilio", "whatsapp", "+1:+2") != order
+    for blank in ("", "  "):
+        with pytest.raises(ValueError, match="provider_message_id must be a non-blank string"):
+            s.keyspace.receipt_flag_key("twilio", blank)
+        with pytest.raises(ValueError, match="channel must be a non-blank string"):
+            s.keyspace.receipt_flag_key(blank, "SM1")
+        with pytest.raises(ValueError, match="client_address must be a non-blank string"):
+            s.keyspace.outbound_order_key("twilio", "+1", blank)
+        with pytest.raises(ValueError, match="our_identity must be a non-blank string"):
+            s.keyspace.outbound_order_key("twilio", blank, "+2")
+    with pytest.raises(ValueError, match="channel"):
+        s.keyspace.receipt_flag_key("twi:lio", "SM1")

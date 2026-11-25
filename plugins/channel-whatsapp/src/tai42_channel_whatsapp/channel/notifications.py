@@ -34,6 +34,7 @@ from tai42_channel_whatsapp.channel.interactive import (
     numbered_body,
 )
 from tai42_channel_whatsapp.channel.media import message_with_links, send_file_media, send_one_file
+from tai42_channel_whatsapp.channel.send_order import await_previous_delivery
 from tai42_channel_whatsapp.client import (
     SentMessage,
     send_interactive_buttons,
@@ -262,9 +263,11 @@ async def _render_section_list(
         if header is not None:
             prelude.append(await send_one_file(phone_number_id, target, header))
         text_body = _numbered_sections_body(body, sections, footer, reply_hint)
+        await await_previous_delivery(prelude)
         return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
     header_obj = _interactive_header(header)
     prelude = await _leading_header(phone_number_id, target, header, header_obj)
+    await await_previous_delivery(prelude)
     return [
         *prelude,
         await send_interactive_list(
@@ -285,6 +288,7 @@ async def _render_lone_cta_url(
     """Render a lone link option as a ``cta_url`` interactive (one URL button)."""
     header_obj = _interactive_header(header)
     prelude = await _leading_header(phone_number_id, target, header, header_obj)
+    await await_previous_delivery(prelude)
     return [
         *prelude,
         await send_interactive_cta_url(
@@ -311,6 +315,7 @@ async def _render_link_only(
     if header is not None:
         prelude.append(await send_one_file(phone_number_id, target, header))
     text_body = _append_lines(body_with_links, [footer] if footer else [])
+    await await_previous_delivery(prelude)
     return [*prelude, await send_message(phone_number_id=phone_number_id, to=target, body=text_body)]
 
 
@@ -397,6 +402,7 @@ async def _render_reply_options(
     reply_ids = _mint_wire_ids([reply.id for reply in replies], "notification")
     header_obj = _interactive_header(header) if kind != "fallback" else None
     prelude = await _leading_header(phone_number_id, target, header, header_obj)
+    await await_previous_delivery(prelude)
     message = await _render_reply_kind(
         phone_number_id, target, kind, replies, reply_ids, body, header_obj, footer, choice_label, reply_hint
     )
@@ -438,8 +444,8 @@ async def _send_interactive_notification(
 
     Returns every :class:`SentMessage` in send order (any audio header, or a header on a text
     fallback, rides ahead of the interactive so the actionable message stays at the
-    foot). ``links_media`` are the ``link`` MEDIA items appended to the body as text
-    lines.
+    foot; the interactive is sent once the medium reports that header delivered).
+    ``links_media`` are the ``link`` MEDIA items appended to the body as text lines.
 
     Wire mapping (Cloud API):
 
@@ -492,7 +498,8 @@ async def send_notification(phone_number_id: str, target: str, notification: Cha
     In order: the message body / interactive choice surface (carrying the text and any
     tappable ``options``/``sections``, plus ``link`` media appended as body lines), then a
     ``location`` message, then each file-media item (image/document/video/audio) as its own
-    native message. A MEDIA-ONLY / location-only notification (blank message, no options)
+    native message. Each message after the first is sent once the medium reports the one before
+    it delivered. A MEDIA-ONLY / location-only notification (blank message, no options)
     skips the body send entirely. Tappable options enter the conversation as a visitor
     message on tap (their reply ids carry no pending-ask interaction part unless authored to
     collide). A file-media part that fails mid-send raises naming the wamids already delivered
@@ -515,6 +522,7 @@ async def send_notification(phone_number_id: str, target: str, notification: Cha
 
     if notification.location is not None:
         location = notification.location
+        await await_previous_delivery(sent)
         sent.append(
             await send_location(
                 phone_number_id=phone_number_id,

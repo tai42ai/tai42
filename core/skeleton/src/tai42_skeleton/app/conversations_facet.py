@@ -3,7 +3,8 @@
 Forwards to the bridge in :mod:`tai42_skeleton.conversations`. ``accept`` turns a received
 message into an agent turn and returns the new message's id; ``record_delivery_status`` is the
 out-of-band sink an adapter calls when a provider later reports an outbound message's terminal
-fate; ``send_recorded`` records a send the adapter makes itself.
+fate; ``await_delivery`` holds an adapter's next send until its previous message is reported
+delivered; ``send_recorded`` records a send the adapter makes itself.
 """
 
 from __future__ import annotations
@@ -72,6 +73,12 @@ class ConversationsFacet:
     ) -> None:
         """Record a provider's terminal delivery status for an outbound message."""
         await self._app._conversation_record_delivery_status(channel, provider_message_id, status, errors=errors)
+
+    async def await_delivery(self, channel: str, provider_message_id: str) -> None:
+        """Hold until ``provider_message_id`` on ``channel`` is reported delivered, or the receipt wait elapses."""
+        from tai42_skeleton.conversations.outbound_order import await_delivery
+
+        await await_delivery(channel, provider_message_id)
 
     async def send_recorded(
         self,

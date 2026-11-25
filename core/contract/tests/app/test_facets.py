@@ -106,10 +106,11 @@ EXPECTED_FACADE = {
     "names",
     "handle_inbound_answer",
     "record_send_receipt",
-    # conversations (6)
+    # conversations (7)
     "accept",
     "pending_messages",
     "record_delivery_status",
+    "await_delivery",
     "send_recorded",
     "register_target_validator",
     "notify_inbound_rejected",
@@ -375,11 +376,11 @@ def test_facade_partition_against_frozen_surface():
     assert union == EXPECTED_FACADE, (
         f"only-facade={sorted(union - EXPECTED_FACADE)} only-frozen={sorted(EXPECTED_FACADE - union)}"
     )
-    # 181 (sub-protocol, member) pairs over 177 distinct names — ``store`` is exposed
+    # 182 (sub-protocol, member) pairs over 178 distinct names — ``store`` is exposed
     # by AppVersioning, AppPresets and AppToolMeta (two duplicate pairs), and
     # ``register``/``get`` by both AppWebhookVerifiers and AppChannels (one each).
-    assert len(union) == 177, f"union={len(union)}"
-    assert total == 181 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
+    assert len(union) == 178, f"union={len(union)}"
+    assert total == 182 == len(union) + 4, f"partition broken: sum={total} union={len(union)}"
 
 
 def test_taiapp_exposes_twenty_six_namespaces():
@@ -747,6 +748,9 @@ def test_app_conversations_is_runtime_checkable_and_shaped():
         ) -> None:
             return None
 
+        async def await_delivery(self, channel: str, provider_message_id: str) -> None:
+            return None
+
         async def send_recorded(self, **kwargs: object) -> object:
             return None
 
@@ -807,6 +811,12 @@ def test_facet_methods_are_coroutines_with_the_expected_parameters():
         "provider_message_id",
         "status",
         "errors",
+    ]
+    assert inspect.iscoroutinefunction(AppConversations.await_delivery)
+    assert list(inspect.signature(AppConversations.await_delivery).parameters) == [
+        "self",
+        "channel",
+        "provider_message_id",
     ]
     assert inspect.iscoroutinefunction(AppConversations.send_recorded)
     recorded_sig = inspect.signature(AppConversations.send_recorded)

@@ -358,6 +358,7 @@ class RecordPruneMixin(RecordStoreBase):
         thread_key = self.settings.keyspace.thread_index_key(route_name, thread_id)
         route_key = self.settings.keyspace.route_threads_key(route_name)
         status_keys = [self.settings.keyspace.status_index_key(status.value) for status in _INDEXED_STATUSES]
+        flag_prefixes = self.settings.keyspace.receipt_flag_prefixes()
         removed = 0
         async with _records.client_ctx(RedisClient, self.settings.redis) as r:
             while True:
@@ -369,7 +370,9 @@ class RecordPruneMixin(RecordStoreBase):
                     break
                 for message_id in members:
                     keys = [self.settings.keyspace.record_key(message_id), *status_keys, thread_key, route_key]
-                    removed += int(await eval_script(r, _DELETE_LUA, len(keys), *keys, message_id, thread_id))
+                    removed += int(
+                        await eval_script(r, _DELETE_LUA, len(keys), *keys, message_id, thread_id, flag_prefixes)
+                    )
             await awaited(r.delete(thread_key))
             await awaited(r.zrem(route_key, thread_id))
             await awaited(r.delete(self.settings.keyspace.mode_key(thread_id)))

@@ -249,6 +249,7 @@ async def deliver_with_retry(
 
     await recorded_send(
         channel=channel,
+        channel_obj=channel_obj,
         address=address,
         parts=[part],
         sent_by="ask",

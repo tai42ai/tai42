@@ -111,7 +111,10 @@ async def test_a_receipt_still_settles_a_send_whose_route_was_deleted(lua_env, m
     record = await _send(lua_env, monkeypatch, "ok", delete=True)
 
     assert await lua_env.store.resolve_outbound("twilio", "out-1") == record.message_id
-    assert await lua_env.store.ingest_receipt(record.message_id, DeliveryReceipt.DELIVERED, time.time()) == 1
+    receipt = await lua_env.store.ingest_receipt(
+        record.message_id, "twilio", "out-1", DeliveryReceipt.DELIVERED, time.time()
+    )
+    assert receipt == 1
     settled = await lua_env.store.get_record(record.message_id)
     assert settled is not None
     assert settled.delivery_status is DeliveryStatus.DELIVERED

@@ -554,6 +554,21 @@ class AppConversations(Protocol):
         """
         ...
 
+    async def await_delivery(self, channel: str, provider_message_id: str) -> None:
+        """Hold until the medium reports ``provider_message_id`` delivered, or the receipt wait elapses.
+
+        For a channel that declares ``confirms_delivery_by_receipt`` and sends several provider
+        messages for one notification: called after each send but the last, so they reach the
+        participant in send order. Returns on a DELIVERED receipt; returns after
+        ``CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS`` with one WARNING naming the missing receipt;
+        raises ``ChannelDeliveryError(retryable=False)`` carrying the provider's error detail on a
+        FAILED receipt. Without a conversations store there is nothing to wait on: returns at once.
+        The hold is the platform's own time: it does not spend the send's medium bound
+        (``CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS``) and keeps the claim or record covering the
+        send alive; inside an ask's delivery it waits within the question's own deadline.
+        """
+        ...
+
     async def send_recorded(
         self,
         *,

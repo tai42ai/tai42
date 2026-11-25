@@ -18,8 +18,9 @@ from tests._helpers import AddressingChannel
 
 from tai42_skeleton.conversations import delivery as delivery_module
 from tai42_skeleton.conversations.address import canonical_address
+from tai42_skeleton.conversations.channel_refusal import unsupported_rich_capability
 from tai42_skeleton.conversations.delivery import _backoff_seconds, _sign, split_message
-from tai42_skeleton.conversations.delivery_channel import _part_notification, _unsupported_rich_capability
+from tai42_skeleton.conversations.delivery_channel import _part_notification
 from tai42_skeleton.conversations.models import ConversationRecord, DeliveryStatus
 from tai42_skeleton.conversations.settings import ConversationsSettings
 
@@ -189,9 +190,9 @@ def test_unsupported_rich_capability_names_form():
     # fakes carry only ``notify`` (the one method the walk's channel touches), cast to
     # the protocol as the notify-door tests do.
     part = AnswerPart(message="fill this in", schema=_FORM_SCHEMA)
-    assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [part]) == "form"
-    assert _unsupported_rich_capability(cast("Channel", _FormChannel()), [part]) is None
-    assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [AnswerPart(message="plain")]) is None
+    assert unsupported_rich_capability(cast("Channel", _PlainChannel()), [part]) == "form"
+    assert unsupported_rich_capability(cast("Channel", _FormChannel()), [part]) is None
+    assert unsupported_rich_capability(cast("Channel", _PlainChannel()), [AnswerPart(message="plain")]) is None
 
 
 # -- rich-part seams: the extended vocabulary (location / options / sections / header/footer) ---
@@ -242,16 +243,16 @@ def test_part_notification_maps_location_and_link_options():
 
 def test_unsupported_rich_capability_names_location_and_sections():
     location_part = AnswerPart(message="here", location=LocationElement(latitude=1.0, longitude=2.0))
-    assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [location_part]) == "location"
-    assert _unsupported_rich_capability(cast("Channel", _RichChannel()), [location_part]) is None
+    assert unsupported_rich_capability(cast("Channel", _PlainChannel()), [location_part]) == "location"
+    assert unsupported_rich_capability(cast("Channel", _RichChannel()), [location_part]) is None
 
     sections_part = AnswerPart(message="menu", sections=[OptionSection(title="s", rows=[ReplyOption(text="r")])])
-    assert _unsupported_rich_capability(cast("Channel", _PlainChannel()), [sections_part]) == "interactive sections"
-    assert _unsupported_rich_capability(cast("Channel", _RichChannel()), [sections_part]) is None
+    assert unsupported_rich_capability(cast("Channel", _PlainChannel()), [sections_part]) == "interactive sections"
+    assert unsupported_rich_capability(cast("Channel", _RichChannel()), [sections_part]) is None
 
 
 def test_unsupported_rich_capability_ignores_header_and_footer():
     # A header/footer is a pure enhancement of an already-gated interactive message; a channel
     # with interactive support but no special header handling still renders the part.
     part = AnswerPart(message="menu", options=[ReplyOption(text="a")], header=_IMG, footer="f")
-    assert _unsupported_rich_capability(cast("Channel", _RichChannel()), [part]) is None
+    assert unsupported_rich_capability(cast("Channel", _RichChannel()), [part]) is None

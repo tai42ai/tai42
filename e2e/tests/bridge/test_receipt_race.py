@@ -11,7 +11,9 @@ The ordering is made deterministic by a mid-send barrier on the twilio stub: the
 enough to split into more than one SMS chunk, and the stub holds the SECOND chunk's send open
 while the test posts the vendor status callback for the FIRST chunk's already-indexed
 ``MessageSid``. That guarantees the callback lands while the record is still ``pending_delivery``
-(the first chunk is indexed, ``mark_provisional`` has not run). While the send is held, the
+(the first chunk is indexed, ``mark_provisional`` has not run). The stub's automatic receipt for
+the first chunk is withheld, so the second chunk goes out only once the platform's receipt wait
+elapses, and the test's own callback is the first chunk's only receipt. While the send is held, the
 record is read back through the admin transcript door to prove the receipt is parked
 (``delivery_status`` still ``pending_delivery``, ``pending_receipt`` set); once the send
 completes the record is terminal ``delivered`` with the answer intact and every chunk sent
@@ -131,6 +133,7 @@ async def test_receipt_before_provisional_is_parked_and_applied(
         except BaseException as exc:
             errors.append(exc)
 
+    bridge.fake_twilio.receipts.withhold(f"{marker}-0000")
     bridge.fake_twilio.send_barrier = barrier
     try:
         inbound = bridge.twilio_inbound(our_identity=identity, client=client, text="hello", port=port)

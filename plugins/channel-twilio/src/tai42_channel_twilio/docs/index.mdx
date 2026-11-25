@@ -44,11 +44,16 @@ retry policy names, and a reload answers a retriable `503`.
 The status callback surfaces a **late** delivery outcome. For a **bridge**
 message Twilio accepts the send, then posts a `failed`/`undelivered` status,
 which flips the answer record to `failed` (this is how the WhatsApp 24-hour
-service window is surfaced on the async path); a `delivered` status confirms it.
+service window is surfaced on the async path); a `delivered` or `read` status confirms it.
 For a **`notify_user` send** (which runs no bridge record) the status is
 resolved to that send and posted as a `delivery_receipt` event onto its
 monitoring trace — `failed` as an `ERROR`. A status neither owns is acknowledged
 and ignored.
+
+Twilio returns a send once the message is queued, so the channel declares that it confirms
+delivery by receipt: the platform holds the next send to the same participant until the
+previous one is reported `delivered` or `read`, at most
+`CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS`, so a participant reads the messages in send order.
 
 ## Inbound media
 

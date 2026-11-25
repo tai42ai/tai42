@@ -757,6 +757,16 @@ async def test_notify_form_sends_media_prelude_then_flow_last_no_reservation(
     )
 
     assert outcome.message_ids == ["wamid.LINKS", "wamid.IMG", "wamid.FLOW"]  # every wamid, in send order
+    # Each message after the first waits for the medium to report the previous one delivered.
+    holds = [value for kind, value in fake_httpx.events if kind == "await_delivery"]
+    assert holds == ["wamid.LINKS", "wamid.IMG"]
+    assert [kind for kind, _ in fake_httpx.events if kind in {"http_post", "await_delivery"}] == [
+        "http_post",
+        "await_delivery",
+        "http_post",
+        "await_delivery",
+        "http_post",
+    ]
     # Media rides ahead: the link line-block, then each image — the Flow message LAST,
     # so the actionable prompt sits at the foot of the chat.
     assert fake_httpx.calls[0]["json"]["type"] == "text"

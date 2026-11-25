@@ -65,6 +65,44 @@ def test_an_overlap_cancel_poll_at_or_above_the_thread_lease_is_refused(monkeypa
         ConversationsSettings()
 
 
+def test_the_receipt_wait_and_poll_defaults():
+    s = ConversationsSettings()
+    assert s.delivery_receipt_wait_seconds == 3
+    assert s.delivery_receipt_poll_seconds == 0.1
+
+
+def test_a_receipt_poll_at_or_above_the_receipt_wait_is_refused(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS", "1")
+    monkeypatch.setenv("CONVERSATIONS_DELIVERY_RECEIPT_POLL_SECONDS", "1")
+    with pytest.raises(
+        ValidationError,
+        match=r"CONVERSATIONS_DELIVERY_RECEIPT_POLL_SECONDS .* must be below "
+        r"CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS",
+    ):
+        ConversationsSettings()
+
+
+def test_a_send_timeout_plus_receipt_wait_at_or_above_the_delivery_lease_is_refused(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+
+    # A chunk's send and its hold for the previous receipt both run inside one claim refresh.
+    monkeypatch.setenv("CONVERSATIONS_DELIVERY_CLAIM_LEASE_SECONDS", "120")
+    monkeypatch.setenv("CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS", "100")
+    monkeypatch.setenv("CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS", "20")
+    with pytest.raises(
+        ValidationError,
+        match=(
+            r"CONVERSATIONS_DELIVERY_SEND_TIMEOUT_SECONDS .* plus CONVERSATIONS_DELIVERY_RECEIPT_WAIT_SECONDS .* "
+            r"must be below CONVERSATIONS_DELIVERY_CLAIM_LEASE_SECONDS"
+        ),
+    ):
+        ConversationsSettings()
+
+
 def test_a_non_positive_split_cap_is_refused_at_startup(monkeypatch):
     import pytest
     from pydantic import ValidationError

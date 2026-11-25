@@ -161,6 +161,16 @@ class RecordSendMixin(RecordWriteMixin):
         if not written:
             raise RuntimeError(f"send record {record.message_id} already exists; nothing was sent")
 
+    async def extend_settle_deadline(self, message_id: str, settle_deadline: float) -> bool:
+        """Move a ``sending`` row's settle deadline forward; ``False`` when the row is no longer ``sending``.
+
+        The ``sending`` index is scored by the settle deadline (:meth:`begin_send_record`); an ended row
+        has left that index, so only a live send is moved.
+        """
+        key = self.settings.keyspace.status_index_key(DeliveryStatus.SENDING.value)
+        async with _records.client_ctx(RedisClient, self.settings.redis) as r:
+            return int(await awaited(r.zadd(key, {message_id: settle_deadline}, xx=True, ch=True))) == 1
+
     async def complete_send_record(self, record: ConversationRecord, *, route: ConversationRoute) -> SendPlacement:
         """Complete a ``sending`` record from its outcome: ``record`` carries the outcome's fields and ``sends``.
 
@@ -202,6 +212,7 @@ class RecordSendMixin(RecordWriteMixin):
                 len(ids),
                 thread_door(route, record.thread_id) or "",
                 self.settings.keyspace.writer_prefixes(),
+                self.settings.keyspace.receipt_flag_prefixes(),
             )
         return _placement(reply)
 
@@ -236,6 +247,7 @@ class RecordSendMixin(RecordWriteMixin):
                 record.route_name,
                 "1" if person else "",
                 self.settings.keyspace.writer_prefixes(),
+                self.settings.keyspace.receipt_flag_prefixes(),
             )
         return _placement(reply)
 
