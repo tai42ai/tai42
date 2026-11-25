@@ -131,6 +131,7 @@ from tai42_e2e.manifests.marketplace import (
     build_marketplace_stack,
     build_marketplace_supervised_stack,
 )
+from tai42_e2e.manifests.memory import build_memory_stack
 from tai42_e2e.manifests.monitoring import build_dead_collector_monitoring_stack, build_monitoring_stack
 from tai42_e2e.manifests.off import build_off_stack
 from tai42_e2e.manifests.projection import build_projection_authz_stack, build_projection_stack
@@ -268,6 +269,7 @@ __all__ = [
     "build_mcp_door_without_public_url_stack",
     "build_media_bridge_no_store_stack",
     "build_media_bridge_stack",
+    "build_memory_stack",
     "build_minimal_stack",
     "build_misbehaving_mcp_stack",
     "build_monitoring_stack",

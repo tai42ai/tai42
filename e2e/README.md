@@ -162,18 +162,21 @@ docker compose --profile agents-redis up -d
 | Scheduling across backends (`schedule_task`, the scheduler process) | `tests/scheduling/` |
 | Correctness under width (4 uvicorn workers, ≥32 in-flight) | `tests/scale/` |
 | Tool extensions through the stack (cache, chain, monitor, ask_external, output_schema) | `tests/extensions/` |
+| Memory of a long-lived serve under a repeated jq load (compute-pool children held and replaced, serve growth across passes, memory returned once idle) | `tests/memory/` |
 
 ## Layout
 
 - `src/tai42_e2e/` — the harness library (imported by tests, never by the SUT):
   boot engine (`stack.py`), process spawning (`procs.py`), Redis/PG/RabbitMQ admin
-  (`redisx.py`, `pg.py`, `rabbitx.py`), the plugin-variant adapters (`variants.py`),
-  manifest/env profile builders (`manifests.py`), the scripted LLM stub
-  (`llmstub.py`), the net fixtures (`netfixtures.py`), the severable TCP relay the
-  outage specs inject with (`tcprelay.py`), the single waiting primitive
-  (`waiting.py`), and failure diagnostics (`diagnostics.py`).
+  (`redisx.py`, `pg.py`, `rabbitx.py`), the plugin-variant adapters (`variants/`),
+  manifest/env profile builders (`manifests/`), the scripted LLM stub
+  (`llmstub.py`), the severable TCP relay the outage specs inject with
+  (`tcprelay.py`), the single waiting primitive (`waiting.py`), failure diagnostics
+  (`diagnostics.py`), the per-process resident memory of a stack's serve tree
+  (`rss.py`), and the memory budget a serve is held to (`memory_budget.py`).
 - `src/tai42_e2e_fixtures/` — SUT-SIDE modules the spawned server imports via its
-  manifest: the probe tools (`tools.py`), the managed MCP server the fixture
+  manifest: the probe tools (`tools/`, the large structured document of the memory
+  suite among them), the managed MCP server the fixture
   connector descriptors launch (`managed_mcp_server.py`), and the second value on
   each pluggable variant — the PG-backed identity provider (`identity_provider.py`),
   the storage backend (`storage.py`), and the monitoring backend
@@ -222,6 +225,20 @@ a change to a shared root, sets `run_e2e`):
   widens the matrix onto firefox + webkit. With the token it also clones the private
   `tai-marketplace` monorepo (its `web/` workspace is the browse site) and runs the
   marketplace browser specs under `TAI_E2E_MARKETPLACE=1`.
+- `e2e-memory` — the memory suite (`TAI_E2E_MEMORY=1`, see "Memory area" below):
+  boots a two-worker serve with the chain extension on the jemalloc allocator
+  environment, runs the same 64 jq programs eight times over a ~20 MiB document,
+  with two plain document calls beside every batch so executor threads build it too,
+  samples the serve's process tree idle before the load, between batches and idle
+  after it, and fails when jemalloc is not mapped in the serve or `PYTHONMALLOC=malloc`
+  is not in its environment, when a compute-pool child reaches 360 MiB, when the idle
+  serve ends above 1.5x its size after the first pass or still holds half or more of
+  what the load grew it above its idle baseline, when the compute-pool children were
+  never replaced, or when a call was lost. It runs on the release-please train branch
+  (the PR tree that gets tagged and published on merge) and on the `memory` lane of a manual
+  `workflow_dispatch`, never on other PRs or pushes, and needs the `redis:7-alpine`
+  and `postgres:16-alpine` service containers and the `libjemalloc2` package, which
+  it installs.
 
 The marketplace legs need the private `tai42ai/tai-marketplace` repo, so they run
 only when the `RELEASE_PLEASE_TOKEN` secret is available — a fork PR has no
@@ -270,4 +287,51 @@ boots at the exact commit being validated. Reproduce a dispatched run locally:
 
 ```bash
 TAI_E2E_MARKETPLACE_REF=<40-hex-sha> TAI_E2E_MARKETPLACE=1 uv run --no-sync pytest tests/marketplace
+```
+
+## Memory area (opt-in)
+
+`tests/memory/` only collects when `TAI_E2E_MEMORY=1`; unset, it is skipped at
+collection like `tests/monitoring/`. It boots one stack, `memory_stack`: a
+`tai serve --workers 2` with no backend and no metrics process, the chain tool
+extension over the `e2e_document` probe, the default two compute-pool children per
+worker, and `COMPUTE_WORKER_MAX_TASKS=128`, so every compute-pool child is replaced
+inside the load. Every process of the stack runs on the allocator environment a
+deployment sets, `LD_PRELOAD=libjemalloc.so.2`, `MALLOC_CONF=background_thread:true`
+and `PYTHONMALLOC=malloc`: CPython serves small objects from arenas it maps outside
+`malloc` and unmaps only when wholly empty, and `PYTHONMALLOC=malloc` sends every
+allocation through jemalloc instead. Before the first sample the suite reads
+`/proc/<serve pid>/maps` and fails unless jemalloc is mapped in the serve, and reads
+`/proc/<serve pid>/environ` and fails unless `PYTHONMALLOC=malloc` is in it. The suite
+therefore runs on Linux with the `libjemalloc2` package installed (`apt-get install
+libjemalloc2` on Debian or Ubuntu).
+
+The load runs 64 distinct jq programs, eight times each, as chained
+`e2e_document_chain` -> jq -> `e2e_record` calls through `POST /api/run-tool`, eight at
+a time, over a structured document of at least 20 MiB of JSON the serve builds itself.
+Beside every batch, two plain `e2e_document` calls go through the same door: it runs a
+sync tool on an executor thread of the uvicorn worker, so those threads build the
+document too, while the chained calls build it on the event loop.
+Before it starts, the suite checks the document's size, then sends rounds of chained
+probe calls, as many at once as the stack has compute-pool children, until every
+worker's compute pool is up (a pool starts on its worker's first job), each call
+checking that jq receives the document as an array; it then takes the idle baseline
+over that complete tree. An idle wait samples the serve every second for
+30 s and its last sample is the reading: jemalloc returns memory in steps with flat
+stretches of several seconds, so a short run of equal readings does not mark the end.
+After every batch the suite reads the serve's process tree from one `ps` snapshot, and
+logs it with each worker's thread count. After the last pass the same idle wait gives
+the end.
+
+The budget (`tai42_e2e/memory_budget.py`): no compute-pool child in any sample at or
+above 360 MiB; the serve's idle total at the end at most 1.5x its total after the
+first pass; of what the highest total sampled after the baseline rose above it, the end
+still holding less than half (a load that never rose above the baseline fails); at least
+one compute-pool child replaced after the first pass; every program recorded once per
+pass. The test logs the baseline, first-pass, peak and end totals, the largest child and
+the elapsed time.
+
+```bash
+docker compose up -d
+TAI_E2E_MEMORY=1 uv run --no-sync pytest tests/memory
 ```
