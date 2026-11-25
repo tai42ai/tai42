@@ -6288,7 +6288,7 @@ dev = [
 
 [[package]]
 name = "tai42-skeleton"
-version = "44.0.0"
+version = "44.0.1"
 source = { editable = "core/skeleton" }
 dependencies = [
     { name = "anyio" },
