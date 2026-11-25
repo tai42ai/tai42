@@ -10,9 +10,10 @@ from typing import Any, cast
 
 from babel.core import Locale, UnknownLocaleError
 from babel.lists import format_list
-from jinja2 import Template as JinjaTemplate
 from jinja2 import pass_context
 from tai42_contract.template import TemplateBodyError, TemplateNotFoundError
+
+from tai42_skeleton.template.render_cache import CompiledTemplate
 
 #: The reserved render-context key the rendering layer stamps the subject's locale onto,
 #: read by :func:`list_format` — never a template author's variable (a collision raises).
@@ -61,8 +62,8 @@ def locale_variant_ids(template_id: str, locale: str) -> list[str]:
 
 
 async def compiled_for_locale(
-    template_id: str, locale: str | None, compiled: Callable[[str], Awaitable[JinjaTemplate]]
-) -> JinjaTemplate:
+    template_id: str, locale: str | None, compiled: Callable[[str], Awaitable[CompiledTemplate]]
+) -> CompiledTemplate:
     """Resolve ``template_id`` to a compiled template for ``locale`` through ``compiled``.
 
     ``compiled`` resolves one id, raising :class:`~tai42_contract.template.TemplateNotFoundError`

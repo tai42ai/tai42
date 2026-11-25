@@ -11,14 +11,15 @@ awaits the render, and composes the rest: the render caches and their eviction
 """
 
 import asyncio
+import contextvars
 import itertools
 import threading
 from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Any
 
 from jinja2 import FunctionLoader, TemplateNotFound
-from jinja2 import Template as JinjaTemplate
 from tai42_contract.storage import Storage
 from tai42_contract.template import (
     ImageReference,
@@ -31,13 +32,15 @@ from tai42_contract.template import (
 )
 from tai42_contract.tools import ReferenceHolder
 
+from tai42_skeleton.template.dependency_preload import DependencyPreload
 from tai42_skeleton.template.input_schema import template_input_schema, undeclared_variables
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
 from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
-from tai42_skeleton.template.render_cache import RenderCache
+from tai42_skeleton.template.render_cache import CompiledTemplate, RenderCache
 from tai42_skeleton.template.render_locale import compiled_for_locale, list_format, locale_variant_ids, with_locale
 from tai42_skeleton.template.settings import template_cache_settings
+from tai42_skeleton.template.single_flight import SingleFlight
 from tai42_skeleton.template.sources import SourceLoader
 from tai42_skeleton.template.store_writes import StoreWrites
 
@@ -59,7 +62,7 @@ def _refusal(template_id: str | None, exc: TemplateRenderError, *, rendering: bo
 
     ``template_id`` is the text's stored id, ``None`` for inline content; ``rendering`` says the
     stored text was fetched and compiled and its render had begun, so ``exc`` came from the render
-    (its includes included). A stored id that yields no template text "could not be fetched"; a
+    (its includes and their loads included). A stored id that yields no template text "could not be fetched"; a
     stored text that does not parse (a :class:`TemplateBodyError` before the render) or does not
     render "could not be rendered"; an inline body "is not a renderable template"; ``exc``'s own
     message closes it.
@@ -111,11 +114,21 @@ class ResourceManager:
         # the render's resolved locale from the reserved context key, never a template arg.
         self._env.filters["list_format"] = list_format
 
-        # The render a rendering thread runs, with the loop that drives it: every
-        # {% include %}/{% extends %} dependency loads on that loop, through its pooled
-        # storage client. ``loader_fault`` holds the exception the loader let through during
-        # the current render, which is never the author's.
+        # The render a rendering thread runs, with the loop that drives it and the dependencies
+        # loaded before it began: any other {% include %}/{% extends %} dependency loads on that
+        # loop, through its pooled storage client. ``loader_fault`` holds the exception the
+        # loader let through during the current render, which is never the author's.
         self._render_loop = threading.local()
+        self._loads_in_flight: SingleFlight[str] = SingleFlight()
+        # Renders run on threads of their own, never the loop's default pool: a render waits on a
+        # dependency load, and a load may itself need a default-pool thread (a storage driver's
+        # ``to_thread``), so renders holding every default thread would wait forever. Sized like the
+        # default pool; idle threads end at interpreter exit.
+        self._render_threads = ThreadPoolExecutor(thread_name_prefix="template-render")
+        # The preloads of the renders in progress: every eviction drops its ids from each, so a
+        # render reads an evicted dependency fresh instead of compiling the text read before.
+        # Mutated only on the loop; a render thread reads a preload by single dict lookups.
+        self._preloads: set[DependencyPreload] = set()
 
         self._render_cache = RenderCache(self._env, self._load_by_id, template_cache_settings())
         self._sources = SourceLoader(lambda: self.provider)
@@ -145,39 +158,47 @@ class ResourceManager:
         return self._provider
 
     @contextmanager
-    def _render_scope(self, loop: asyncio.AbstractEventLoop) -> Iterator[None]:
+    def _render_scope(self, loop: asyncio.AbstractEventLoop, preload: DependencyPreload) -> Iterator[None]:
         """Mark this render thread as inside a render whose dependencies load on ``loop``.
 
-        ``loop`` is the loop that awaits the render: the render runs on a thread of its own,
-        and each {% include %}/{% extends %} dependency is loaded on ``loop`` while the
-        thread waits for it. The loader's fault mark is cleared on entry and exit, so a pooled
-        thread never carries one into its next render.
+        ``loop`` is the loop that awaits the render: the render runs on a thread of its own, and
+        each {% include %}/{% extends %} dependency ``preload`` does not answer is loaded on
+        ``loop`` while the thread waits for it. The loader's fault mark is cleared on entry and
+        exit, so a pooled thread never carries one into its next render.
         """
         self._render_loop.active = True
         self._render_loop.loop = loop
+        self._render_loop.preload = preload
         self._render_loop.loader_fault = None
         try:
             yield
         finally:
             self._render_loop.active = False
             self._render_loop.loop = None
+            self._render_loop.preload = None
             self._render_loop.loader_fault = None
 
-    async def _render(self, compile_template: Callable[[], JinjaTemplate], context: dict[str, Any]) -> str:
-        """Compile and render on a thread of its own, sorting what fails into the author's fault or not.
+    async def _render(self, compiled: CompiledTemplate, context: dict[str, Any]) -> str:
+        """Load ``compiled``'s dependencies, then render it on a thread of its own, sorting what fails.
 
-        The only code other than the author's body that runs during the render is the loader
-        (:meth:`_sync_loader`), which marks every fault it lets through: a marked exception
-        propagates as itself. A :class:`TemplateRenderError` passes as raised; Jinja's
-        ``TemplateNotFound`` for an include becomes :class:`TemplateNotFoundError`; anything else
-        the body raises becomes :class:`TemplateBodyError`.
+        The dependencies load before the render begins (:class:`DependencyPreload`); a load failure
+        raises only when the render reaches that dependency. The only code other than the author's
+        body that runs during the render is the loader (:meth:`_sync_loader`), which marks every
+        fault it lets through: a marked exception propagates as itself. A
+        :class:`TemplateRenderError` passes as raised; Jinja's ``TemplateNotFound`` for an include
+        becomes :class:`TemplateNotFoundError`; anything else the body raises becomes
+        :class:`TemplateBodyError`.
+
+        The preload stays registered for evictions until the render thread ends, which may be after
+        a cancelled caller has stopped awaiting it.
         """
         loop = asyncio.get_running_loop()
+        preload = DependencyPreload(self._render_cache, self._load_by_id)
 
-        def _compile_and_render() -> str:
-            with self._render_scope(loop):
+        def _render_on_thread() -> str:
+            with self._render_scope(loop, preload):
                 try:
-                    return compile_template().render(**context)
+                    return compiled.template.render(**context)
                 except Exception as exc:
                     if exc is self._render_loop.loader_fault or isinstance(exc, TemplateRenderError):
                         raise
@@ -185,7 +206,22 @@ class ResourceManager:
                         raise TemplateNotFoundError(f"its include {exc.name!r} is not stored") from exc
                     raise TemplateBodyError(str(exc)) from exc
 
-        return await asyncio.to_thread(_compile_and_render)
+        self._preloads.add(preload)
+        try:
+            await preload.load(compiled.dependencies)
+            # The render runs in a copy of the caller's context, as ``asyncio.to_thread`` runs it.
+            rendering = self._render_threads.submit(contextvars.copy_context().run, _render_on_thread)
+        except BaseException:
+            self._preloads.discard(preload)
+            raise
+        rendering.add_done_callback(lambda _ended: loop.call_soon_threadsafe(self._preloads.discard, preload))
+        return await asyncio.wrap_future(rendering)
+
+    def _forget_loads(self, matches: Callable[[str], bool]) -> None:
+        """Make every evicted id read fresh: detach its read in flight and drop it from each render's preload."""
+        self._loads_in_flight.detach(matches)
+        for preload in list(self._preloads):
+            preload.forget(matches)
 
     async def _load_by_id(self, template_id: str) -> str:
         """Read a template by its bare storage id, root-contained.
@@ -201,8 +237,13 @@ class ResourceManager:
         A stored object that is not UTF-8 text raises
         :class:`~tai42_contract.template.TemplateNotTextError` naming ``template_id``: it exists,
         but it is not a template.
+
+        Concurrent reads of one id share a single provider read while it is in flight.
         """
         _guarded_id(template_id)
+        return await self._loads_in_flight.run(template_id, lambda: self._read_text(template_id))
+
+    async def _read_text(self, template_id: str) -> str:
         try:
             return await self.provider.load(template_id)
         except UnicodeDecodeError as exc:
@@ -214,9 +255,10 @@ class ResourceManager:
         """Synchronous bridge for Jinja2's FunctionLoader, fetching a dependency from async storage.
 
         Lets {% extends %} and {% include %} fetch their dependency from async storage: called
-        on the render's thread, it loads the dependency on the loop that drives the render
-        (:meth:`_render_scope`) and waits for it. Called outside a render it raises
-        ``RuntimeError``.
+        on the render's thread, it answers a dependency loaded before the render began from its
+        source, or raises the failure its load raised, and loads any other (one named by an
+        expression, or evicted since) on the loop that drives the render (:meth:`_render_scope`)
+        while it waits. Called outside a render it raises ``RuntimeError``.
 
         A genuinely missing dependency becomes ``None`` so Jinja raises
         ``TemplateNotFound`` (keeping ``{% include ... ignore missing %}``
@@ -234,6 +276,9 @@ class ResourceManager:
                 "while render_by_id or render_templated_text drives the render"
             )
         try:
+            source = self._render_loop.preload.answer(template_id)
+            if source is not None:
+                return source
             return asyncio.run_coroutine_threadsafe(self._load_by_id(template_id), self._render_loop.loop).result()
         except FileNotFoundError:
             absent.add(template_id)
@@ -300,6 +345,7 @@ class ResourceManager:
         """
         self.generation += 1
         self._render_cache.clear()
+        self._forget_loads(lambda _template_id: True)
         self._on_evicted(TemplateEviction(path=None))
 
     def evict_compiled(self, template_id: str) -> None:
@@ -315,6 +361,7 @@ class ResourceManager:
         """
         self.generation += 1
         self._render_cache.evict(template_id)
+        self._forget_loads(lambda name: name == template_id)
         self._on_evicted(TemplateEviction(path=template_id))
 
     def evict_dir(self, path: str) -> None:
@@ -326,7 +373,9 @@ class ResourceManager:
         compilation under the prefix through this one seam. Idempotent.
         """
         self.generation += 1
-        self._render_cache.evict_prefix(path.rstrip("/") + "/")
+        prefix = path.rstrip("/") + "/"
+        self._render_cache.evict_prefix(prefix)
+        self._forget_loads(lambda name: name.startswith(prefix))
         self._on_evicted(TemplateEviction(path=path.rstrip("/"), prefix=True))
 
     def get_cache_info(self) -> Any:
@@ -348,12 +397,12 @@ class ResourceManager:
             probes = [guarded] if locale is None else locale_variant_ids(guarded, locale)
             for candidate in probes:
                 record_template_read(candidate)
-            template = await compiled_for_locale(template_id, locale, self._render_cache.compiled)
+            compiled = await compiled_for_locale(template_id, locale, self._render_cache.compiled)
         except TemplateRenderError as exc:
             raise _refusal(template_id, exc, rendering=False) from exc
         try:
             context = with_locale(kwargs or {}, locale)
-            return await self._render(lambda: template, context)
+            return await self._render(compiled, context)
         except TemplateRenderError as exc:
             raise _refusal(template_id, exc, rendering=True) from exc
 
@@ -379,7 +428,9 @@ class ResourceManager:
             raise AssertionError
         try:
             context = with_locale(text.kwargs, locale)
-            return await self._render(lambda: self._render_cache.inline(content), context)
+            loop = asyncio.get_running_loop()
+            compiled = await loop.run_in_executor(self._render_threads, self._render_cache.inline, content)
+            return await self._render(compiled, context)
         except TemplateRenderError as exc:
             raise _refusal(None, exc, rendering=False) from exc
 

@@ -11,6 +11,7 @@ from jinja2.exceptions import SecurityError
 from tai42_contract.template import TemplateBodyError, TemplatedText, TemplateNotFoundError
 
 from tai42_skeleton.template import ResourceManager
+from tai42_skeleton.template.dependency_preload import DependencyPreload
 from tai42_skeleton.template.render_locale import with_locale
 
 from ._manager_fixtures import _manager
@@ -74,8 +75,8 @@ async def _reference_render(manager: ResourceManager, text: TemplatedText, local
     loop = asyncio.get_running_loop()
 
     def _render() -> str:
-        with manager._render_scope(loop):
-            return manager._render_cache.inline(content).render(**context)
+        with manager._render_scope(loop, DependencyPreload(manager._render_cache, manager._load_by_id)):
+            return manager._render_cache.inline(content).template.render(**context)
 
     return await asyncio.to_thread(_render)
 
