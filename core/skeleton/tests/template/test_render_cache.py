@@ -222,6 +222,22 @@ async def test_reupload_of_extended_resource_is_served_fresh(monkeypatch: pytest
     assert await manager.render_by_id("child.j2") == "two[C]"
 
 
+async def test_evicting_an_include_rereads_only_that_include(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An evicted include is read again on its includer's next render; the includer and its
+    other includes stay compiled and are not read."""
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, store = _manager(
+        {"page.j2": '{% include "lib/a.j2" %}{% include "lib/b.j2" %}', "lib/a.j2": "a", "lib/b.j2": "b"}
+    )
+    assert await manager.render_by_id("page.j2") == "ab"
+
+    store.items["lib/a.j2"] = "A"
+    manager.evict_compiled("lib/a.j2")
+    reads_before = len(store.loads)
+    assert await manager.render_by_id("page.j2") == "Ab"
+    assert store.loads[reads_before:] == ["lib/a.j2"]
+
+
 async def test_evict_dir_frees_engine_cached_includes(monkeypatch: pytest.MonkeyPatch) -> None:
     """A dir evict drops engine-cached include targets under the prefix, even when
     the includer itself lies outside the prefix and stays compiled."""

@@ -8,12 +8,13 @@ under a prefix, or everything.
 """
 
 import logging
+import weakref
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
-from typing import Any
+from typing import Any, NamedTuple
 
 from async_lru import alru_cache
-from jinja2 import Environment, TemplateSyntaxError
+from jinja2 import Environment, meta, nodes
 from jinja2 import Template as JinjaTemplate
 from tai42_contract.template import TemplateBodyError, TemplateNotFoundError
 
@@ -21,6 +22,20 @@ from tai42_skeleton.template.absent_ids import AbsentTemplateIds
 from tai42_skeleton.template.settings import TemplateCacheSettings
 
 logger = logging.getLogger(__name__)
+
+
+class CompiledTemplate(NamedTuple):
+    """A compiled template and the names of the templates it includes, extends or imports by a literal name.
+
+    A dependency named by an expression is not among ``dependencies``: it is known only at render.
+    """
+
+    template: JinjaTemplate
+    dependencies: frozenset[str]
+
+
+def _literal_dependencies(ast: nodes.Template) -> frozenset[str]:
+    return frozenset(name for name in meta.find_referenced_templates(ast) if name is not None)
 
 
 class RenderCache:
@@ -42,7 +57,7 @@ class RenderCache:
         # path is cached by id via ``_compiled``; without this an inline
         # condition/expr (e.g. a hook rendered on every fire) is re-parsed on
         # every render.
-        self.inline: Callable[[str], JinjaTemplate] = lru_cache(maxsize=settings.max_size)(self._compile)
+        self.inline: Callable[[str], CompiledTemplate] = lru_cache(maxsize=settings.max_size)(self._compile)
 
         # Template ids currently compiled into the cache. Tracked so a delete can
         # evict just the affected key(s) instead of dropping the whole cache. It
@@ -60,7 +75,7 @@ class RenderCache:
         # Ids storage answered "not found" for (an absent locale variant or include target), so a
         # render does not re-read them; dropped by every eviction, so a platform write is seen at once.
         self.absent = AbsentTemplateIds(ttl=settings.ttl, max_size=settings.max_size, enabled=self.enabled)
-        self._compiled: Callable[[str], Awaitable[JinjaTemplate]]
+        self._compiled: Callable[[str], Awaitable[CompiledTemplate]]
         if self.enabled:
             self._compiled = alru_cache(maxsize=settings.max_size, ttl=settings.ttl)(self._fetch_and_compile)
             logger.info(f"ResourceManager initialized with cache_size={settings.max_size} ttl={settings.ttl}")
@@ -69,7 +84,7 @@ class RenderCache:
             self._compiled = self._fetch_and_compile
             logger.info("ResourceManager initialized with caching disabled")
 
-    async def _fetch_and_compile(self, template_id: str) -> JinjaTemplate:
+    async def _fetch_and_compile(self, template_id: str) -> CompiledTemplate:
         logger.debug(f"Fetching template '{template_id}'")
         try:
             content = await self._load(template_id)
@@ -99,14 +114,34 @@ class RenderCache:
                         self._tracked_ids.discard(tracked)
         return self._compile(content)
 
-    def _compile(self, source: str) -> JinjaTemplate:
-        """Compile ``source`` in the manager's environment; a source that does not parse is the author's body fault."""
+    def _compile(self, source: str) -> CompiledTemplate:
+        """Compile ``source`` in the manager's environment.
+
+        Compiling reads nothing, so every fault it raises is the author's body fault.
+        """
         try:
-            return self._env.from_string(source)
-        except TemplateSyntaxError as exc:
+            ast = self._env.parse(source)
+            return CompiledTemplate(self._env.from_string(ast), _literal_dependencies(ast))
+        except Exception as exc:
             raise TemplateBodyError(str(exc)) from exc
 
-    async def compiled(self, template_id: str) -> JinjaTemplate:
+    def dependencies_of(self, name: str, source: str) -> frozenset[str]:
+        """The literal dependency names of the stored template ``name`` whose text is ``source``.
+
+        A source that cannot be parsed is the author's body fault, as it is when the render reaches it.
+        """
+        try:
+            return _literal_dependencies(self._env.parse(source, name=name))
+        except Exception as exc:
+            raise TemplateBodyError(str(exc)) from exc
+
+    def has_dependency(self, name: str) -> bool:
+        """Whether the engine holds the dependency ``name`` compiled, so a render resolves it without a read."""
+        cache, loader = self._env.cache, self._env.loader
+        # The engine keys each entry ``(weakref.ref(loader), name)``, as the eviction below reads it.
+        return cache is not None and loader is not None and (weakref.ref(loader), name) in cache
+
+    async def compiled(self, template_id: str) -> CompiledTemplate:
         """The compiled template ``template_id``; a not-found answer is remembered and raised again without a read.
 
         Only a not-found answer is remembered: a storage error raises as it is, every time.

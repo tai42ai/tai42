@@ -44,3 +44,20 @@ async def test_include_missing_with_ignore_missing_renders_blank() -> None:
     ``ignore missing`` working rather than masking other failures."""
     manager, _ = _manager({"m.j2": 'X[{% include "nope.j2" ignore missing %}]'})
     assert await manager.render_by_id("m.j2") == "X[]"
+
+
+async def test_an_include_named_by_an_expression_loads_through_the_bridge_on_the_driving_loop() -> None:
+    """A dependency named at render time is not in the closure loaded before the render; the
+    loader reads it on the loop that awaits the render while the render thread waits."""
+    manager, store = _manager({"page.j2": "P[{% include name %}]", "lib/a.j2": "A"})
+    loaded_on: dict[str, asyncio.AbstractEventLoop] = {}
+    read = store.load
+
+    async def recording_load(path: str) -> str:
+        loaded_on[path] = asyncio.get_running_loop()
+        return await read(path)
+
+    store.load = recording_load  # type: ignore[method-assign]
+    assert await manager.render_by_id("page.j2", {"name": "lib/a.j2"}) == "P[A]"
+    loop = asyncio.get_running_loop()
+    assert loaded_on == {"page.j2": loop, "lib/a.j2": loop}

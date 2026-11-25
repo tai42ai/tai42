@@ -1,7 +1,12 @@
-"""A ResourceManager over an in-memory ``Storage`` double that records every delete and directory delete."""
+"""A ResourceManager over an in-memory ``Storage`` double that records every load, delete and directory delete.
+
+A load of a held path waits until the test releases it, so a test can see which loads are in flight
+together; a path given a failure raises it when loaded.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 from collections.abc import Awaitable, Callable
 
@@ -19,12 +24,46 @@ class _InMemoryStorage(Storage):
         self.items: dict[str, str] = dict(items or {})
         self.deleted: list[str] = []
         self.deleted_dirs: list[str] = []
+        self.loads: list[str] = []
+        self.cancelled_loads: list[str] = []
+        self.failures: dict[str, Exception] = {}
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self._held: dict[str, asyncio.Event] = {}
+
+    def hold(self, *paths: str) -> asyncio.Event:
+        """Hold every load of ``paths`` until the returned event is set."""
+        release = asyncio.Event()
+        for path in paths:
+            self._held[path] = release
+        return release
+
+    async def until_in_flight(self, count: int) -> None:
+        """Return once ``count`` loads are in flight together; a second's wait means they are not."""
+        async with asyncio.timeout(1):
+            while self.in_flight < count:
+                await asyncio.sleep(0)
 
     async def load(self, path: str) -> str:
+        self.loads.append(path)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        # A load answers the text stored when it began, as a read that a write lands behind does.
+        stored = self.items.get(path)
         try:
-            return self.items[path]
-        except KeyError as exc:
-            raise FileNotFoundError(path) from exc
+            held = self._held.get(path)
+            if held is not None:
+                await held.wait()
+            if path in self.failures:
+                raise self.failures[path]
+            if stored is None:
+                raise FileNotFoundError(path)
+            return stored
+        except asyncio.CancelledError:
+            self.cancelled_loads.append(path)
+            raise
+        finally:
+            self.in_flight -= 1
 
     async def list(self, directory: str | None = None) -> list[str]:
         return keys_under(sorted(self.items), directory)
