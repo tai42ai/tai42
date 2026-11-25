@@ -343,6 +343,10 @@ class HarnessSettings(BaseSettings):
     # on CI / an engine host only). When false, tests/sandbox_docker is skipped at collection.
     sandbox_docker: bool = Field(default=False)
 
+    # Opt in to the memory suite (a long load against one stack, sampling its process
+    # tree). When false, tests/memory is skipped at collection.
+    memory: bool = Field(default=False)
+
     # The REAL/MOCK switch: a comma-separated list of external seams
     # (``TAI_E2E_REAL=slack,llm,stripe``) whose leg runs against the live vendor
     # instead of its in-process mock. Every name must be a ``REAL_SERVICES`` key;

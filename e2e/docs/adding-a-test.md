@@ -37,13 +37,18 @@ count is the speed budget. The profiles:
 - `monitoring_stack` — opt-in, the langfuse plugin against the compose stack.
 - `marketplace_stack` — opt-in, MULTIWORKER(1) wired at the harness-run
   tai42-marketplace registry (short advisories poll, local package index).
+- `memory_stack` — opt-in, MULTIWORKER(2), no backend, no metrics process, the chain
+  extension over the document probe, compute-pool children replaced every 128 jobs,
+  every process preloading jemalloc (`libjemalloc.so.2`, `MALLOC_CONF=background_thread:true`).
+  The memory suite's home, not for reuse: its replacement setting and its load shape
+  are its own.
 - `bare_stack` — the doors MOUNTED but no storage provider and no backend: the
   honest absent-provider profile (`present: false` / 501).
 - `fresh_stack` — a function-scoped factory for tests that mutate global stack
   state (restarts, config races, CWD variants, an injected infra outage). Every
   stack is torn down at test end.
 
-Only add a `build_*_stack` in `manifests.py` when the feature needs a manifest /
+Only add a `build_*_stack` in `manifests/` when the feature needs a manifest /
 env shape no profile has — and add it to `_ALL_BUILDERS` in
 `tests/harness/test_stack_lifecycle.py`, which sweeps EVERY profile for the metrics-dir
 rule.
