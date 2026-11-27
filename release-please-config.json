@@ -27,7 +27,6 @@
     },
     "core/kit": {
       "package-name": "tai42-kit",
-      "release-as": "23.0.2",
       "component": "tai42-kit",
       "skip-changelog": true,
       "exclude-paths": [
