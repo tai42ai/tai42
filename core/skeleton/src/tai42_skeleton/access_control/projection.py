@@ -58,12 +58,12 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
-from async_lru import alru_cache
 from pydantic import BaseModel, Field
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control import UNIVERSAL_SCOPE, PrincipalKind
 from tai42_contract.app import tai42_app
 from tai42_kit.settings import register_settings_reset
+from tai42_kit.utils.async_cache import AsyncCache
 
 from tai42_skeleton.access_control import management
 from tai42_skeleton.access_control.coverage import is_public_only, scopes_cover
@@ -211,7 +211,7 @@ class _FrozenClaims:
 
     Hashes and compares ONLY on the claims digest.
 
-    ``alru_cache`` hashes every argument, so the raw claims dict cannot be a cache arg;
+    The projection cache keys on every build argument, so the raw claims dict cannot be one;
     this wrapper keys solely on the digest (which already captures the whole claims), so
     the cached body reads ``wrapper.claims`` to build the jq contexts without the dict
     itself entering the hash.
@@ -312,33 +312,33 @@ async def _jq_admits(
 # -- cache -------------------------------------------------------------------
 
 
-_CachedBuilder = Callable[[str, int, _FrozenScopes, _FrozenClaims], Awaitable[ProjectionResult]]
-_cached_builder: _CachedBuilder | None = None
+_ProjectionKey = tuple[str, int, _FrozenScopes, _FrozenClaims]
+_projections: AsyncCache[_ProjectionKey, ProjectionResult] | None = None
 
 
-def _get_cached_builder(settings: AccessControlSettings) -> _CachedBuilder:
-    """The memoized ``alru_cache``-wrapped builder, mirroring ``PolicyEnforcer``'s cache.
+def _projection_cache(settings: AccessControlSettings) -> AsyncCache[_ProjectionKey, ProjectionResult]:
+    """The memoized projection cache, mirroring ``PolicyEnforcer``'s cache.
 
     Same ``cache_size`` / ``cache_ttl_seconds`` bound. Version participates in the key, so
     a mutation-driven version bump yields a fresh slot — a cross-worker miss.
     """
-    global _cached_builder
-    if _cached_builder is None:
-        _cached_builder = alru_cache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)(_build_uncached)
-    return _cached_builder
+    global _projections
+    if _projections is None:
+        _projections = AsyncCache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)
+    return _projections
 
 
 @register_settings_reset
 def reset_projection_cache() -> None:
-    """Drop the memoized builder so a fresh settings object (or a test) rebuilds it.
+    """Drop the memoized projection cache so a fresh settings object (or a test) rebuilds it.
 
     Registered with the settings-reset registry so a config reload (which runs
     ``reset_all_settings()``) rebuilds it against the new ``cache_size`` /
-    ``cache_ttl_seconds`` bound instead of serving from a builder bound to the stale
+    ``cache_ttl_seconds`` bound instead of serving from a cache bound to the stale
     settings snapshot, mirroring the sibling ``@register_settings_reset`` caches.
     """
-    global _cached_builder
-    _cached_builder = None
+    global _projections
+    _projections = None
 
 
 # -- the build ---------------------------------------------------------------
@@ -354,8 +354,10 @@ async def build_projection(user_id: str, effective_scopes: list[str], claims: Ma
     settings = access_control_settings()
     version = await policy_enforcer(settings).current_policy_version()
     wrapper = _FrozenClaims(dict(claims), _claims_digest(claims))
-    builder = _get_cached_builder(settings)
-    return await builder(user_id, version, _FrozenScopes(list(effective_scopes)), wrapper)
+    scopes = _FrozenScopes(list(effective_scopes))
+    return await _projection_cache(settings).get_or_load(
+        (user_id, version, scopes, wrapper), lambda: _build_uncached(user_id, version, scopes, wrapper)
+    )
 
 
 async def _build_uncached(

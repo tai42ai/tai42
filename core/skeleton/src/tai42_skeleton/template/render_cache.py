@@ -11,12 +11,12 @@ import logging
 import weakref
 from collections.abc import Awaitable, Callable
 from functools import lru_cache
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
-from async_lru import alru_cache
 from jinja2 import Environment, meta, nodes
 from jinja2 import Template as JinjaTemplate
 from tai42_contract.template import TemplateBodyError, TemplateNotFoundError
+from tai42_kit.utils.async_cache import AsyncCache
 
 from tai42_skeleton.template.absent_ids import AbsentTemplateIds
 from tai42_skeleton.template.settings import TemplateCacheSettings
@@ -32,6 +32,13 @@ class CompiledTemplate(NamedTuple):
 
     template: JinjaTemplate
     dependencies: frozenset[str]
+
+
+class CompiledCacheInfo(NamedTuple):
+    """How many compiled templates the cache holds now, and its bound (``None`` when unbounded)."""
+
+    currsize: int
+    maxsize: int | None
 
 
 def _literal_dependencies(ast: nodes.Template) -> frozenset[str]:
@@ -59,14 +66,6 @@ class RenderCache:
         # every render.
         self.inline: Callable[[str], CompiledTemplate] = lru_cache(maxsize=settings.max_size)(self._compile)
 
-        # Template ids currently compiled into the cache. Tracked so a delete can
-        # evict just the affected key(s) instead of dropping the whole cache. It
-        # stays bounded by what the cache actually holds: a delete prunes stale
-        # ids, and ``_fetch_and_compile`` runs an amortized sweep whenever the set
-        # has grown past the live cache size (an id the cache dropped on its own
-        # via TTL/LRU), so the registry never outgrows the cache itself.
-        self._tracked_ids: set[str] = set()
-
         # Only cache if we have BOTH storage space (>0) AND retention time (>0).
         # If ttl is 0, items expire instantly, making caching useless.
         self.enabled = (settings.max_size is None or settings.max_size > 0) and (
@@ -75,13 +74,11 @@ class RenderCache:
         # Ids storage answered "not found" for (an absent locale variant or include target), so a
         # render does not re-read them; dropped by every eviction, so a platform write is seen at once.
         self.absent = AbsentTemplateIds(ttl=settings.ttl, max_size=settings.max_size, enabled=self.enabled)
-        self._compiled: Callable[[str], Awaitable[CompiledTemplate]]
+        self._compiled: AsyncCache[str, CompiledTemplate] | None = None
         if self.enabled:
-            self._compiled = alru_cache(maxsize=settings.max_size, ttl=settings.ttl)(self._fetch_and_compile)
+            self._compiled = AsyncCache(maxsize=settings.max_size, ttl=settings.ttl)
             logger.info(f"ResourceManager initialized with cache_size={settings.max_size} ttl={settings.ttl}")
         else:
-            # Bypass cache wrapper entirely
-            self._compiled = self._fetch_and_compile
             logger.info("ResourceManager initialized with caching disabled")
 
     async def _fetch_and_compile(self, template_id: str) -> CompiledTemplate:
@@ -98,20 +95,6 @@ class RenderCache:
             logger.debug(f"Template '{template_id}' lookup failed.")
             self.absent.add(template_id)
             raise TemplateNotFoundError(f"Template '{template_id}' not found.") from exc
-
-        if self.enabled:
-            self._tracked_ids.add(template_id)
-            # Amortized prune: the set only exceeds the cache's live entry count
-            # when the cache has evicted ids on its own — LRU eviction under a
-            # bounded max_size AND ttl expiry under an unbounded one — so drop any
-            # tracked id the cache no longer holds. Runs only when there is
-            # something to prune; between sweeps the set tracks the live cache size.
-            cache_info = getattr(self._compiled, "cache_info", None)
-            contains = getattr(self._compiled, "cache_contains", None)
-            if cache_info is not None and contains is not None and len(self._tracked_ids) > cache_info().currsize:
-                for tracked in list(self._tracked_ids):
-                    if not contains(tracked):
-                        self._tracked_ids.discard(tracked)
         return self._compile(content)
 
     def _compile(self, source: str) -> CompiledTemplate:
@@ -148,7 +131,9 @@ class RenderCache:
         """
         if template_id in self.absent:
             raise TemplateNotFoundError(f"Template '{template_id}' not found.")
-        return await self._compiled(template_id)
+        if self._compiled is None:
+            return await self._fetch_and_compile(template_id)
+        return await self._compiled.get_or_load(template_id, lambda: self._fetch_and_compile(template_id))
 
     def _evict_engine_cache(self, matches: Callable[[str], bool]) -> None:
         """Drop every engine-cached dependency template whose name ``matches``.
@@ -182,12 +167,8 @@ class RenderCache:
         dependency cache (``{% include %}``/``{% extends %}`` targets) is always
         present and is cleared whole, so no re-uploaded dependency is served stale.
         """
-        # ``_compiled`` is the alru_cache wrapper only when caching is enabled;
-        # otherwise it's the bare method with no cache controls.
-        cache_clear = getattr(self._compiled, "cache_clear", None)
-        if cache_clear is not None:
-            cache_clear()
-            self._tracked_ids.clear()
+        if self._compiled is not None:
+            self._compiled.clear()
             logger.info("ResourceManager cache cleared.")
         if self._env.cache is not None:
             self._env.cache.clear()
@@ -199,37 +180,20 @@ class RenderCache:
         Idempotent — an already-absent key is a no-op; the compiled-cache drop is a no-op
         when caching is off while the engine-cache drop always runs.
         """
-        invalidate = getattr(self._compiled, "cache_invalidate", None)
-        if invalidate is not None:
-            invalidate(template_id)
-        self._tracked_ids.discard(template_id)
+        if self._compiled is not None:
+            self._compiled.invalidate(template_id)
         self._evict_engine_cache(lambda name: name == template_id)
         self.absent.forget(lambda tracked: tracked == template_id)
 
     def evict_prefix(self, prefix: str) -> None:
-        """Drop every id under ``prefix`` from the compiled cache, the engine cache and the absent ids.
-
-        Tracked ids that the compiled cache has already dropped (TTL/LRU) are pruned in the
-        same pass, keeping the registry bounded by what is actually cached.
-        """
+        """Drop every id under ``prefix`` from the compiled cache, the engine cache and the absent ids."""
         self._evict_engine_cache(lambda name: name.startswith(prefix))
         self.absent.forget(lambda tracked: tracked.startswith(prefix))
-        invalidate = getattr(self._compiled, "cache_invalidate", None)
-        if invalidate is None:
-            # Compiled-template caching disabled: nothing is tracked by id.
-            self._tracked_ids.clear()
-            return
-        contains = getattr(self._compiled, "cache_contains", None)
-        for template_id in list(self._tracked_ids):
-            if template_id.startswith(prefix):
-                invalidate(template_id)
-                self._tracked_ids.discard(template_id)
-            elif contains is not None and not contains(template_id):
-                self._tracked_ids.discard(template_id)
+        if self._compiled is not None:
+            self._compiled.evict(lambda template_id: template_id.startswith(prefix))
 
-    def info(self) -> Any:
-        """The compiled-template cache statistics, or ``None`` when caching is disabled."""
-        cache_info = getattr(self._compiled, "cache_info", None)
-        if cache_info is not None:
-            return cache_info()
-        return None
+    def info(self) -> CompiledCacheInfo | None:
+        """The compiled-template cache's live size and bound, or ``None`` when caching is disabled."""
+        if self._compiled is None:
+            return None
+        return CompiledCacheInfo(currsize=self._compiled.currsize, maxsize=self._compiled.maxsize)

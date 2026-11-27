@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -195,9 +196,12 @@ async def drain_state(
 # -- the run side -----------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class _EntryMark:
-    """The subjects one task has drained at its run entries."""
+    """The subjects one task has drained at its run entries.
 
-    task: asyncio.Task[Any]
+    The task is held weakly: every snapshot of a context carrying the mark keeps it.
+    """
+
+    task: weakref.ref[asyncio.Task[Any]]
     subjects: frozenset[str]
 
 
@@ -232,13 +236,13 @@ async def run_entry_drain() -> AsyncIterator[None]:
     if task is None:
         raise RuntimeError("run_entry_drain must run inside an asyncio task")
     mark = _run_entry_mark.get()
-    drained_keys = mark.subjects if mark is not None and mark.task is task else frozenset()
+    drained_keys = mark.subjects if mark is not None and mark.task() is task else frozenset()
     missing = keys - drained_keys
     if missing:
         await drain_subjects(
             live_states_service(), missing, deadline=monotonic() + _drain_timeout(), applying=_applying_save.get()
         )
-    token = _run_entry_mark.set(_EntryMark(task=task, subjects=drained_keys | keys))
+    token = _run_entry_mark.set(_EntryMark(task=weakref.ref(task), subjects=drained_keys | keys))
     try:
         yield
     finally:
@@ -255,7 +259,7 @@ def outbox_apply_scope(save_id: int, subject_keys: frozenset[str], claim: str) -
     task = asyncio.current_task()
     if task is None:
         raise RuntimeError("outbox_apply_scope must run inside an asyncio task")
-    mark_token = _run_entry_mark.set(_EntryMark(task=task, subjects=subject_keys))
+    mark_token = _run_entry_mark.set(_EntryMark(task=weakref.ref(task), subjects=subject_keys))
     save_token = _applying_save.set(_ApplyingSave(save_id=save_id, subject_keys=subject_keys, claim=claim))
     try:
         yield

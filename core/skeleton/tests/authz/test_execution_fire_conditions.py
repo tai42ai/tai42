@@ -35,10 +35,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 from ..access_control.conftest import FakeRedis, make_client_ctx
 from ..access_control.test_policy_store import _MemStore
 
-# alru caches are held across the several ``asyncio.run`` loops a test opens — a benign
-# loop-reset artifact, since a real process serves one loop for its lifetime.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _ROUTE = "/api/things/wipe"
 _SCOPE = "things"
 

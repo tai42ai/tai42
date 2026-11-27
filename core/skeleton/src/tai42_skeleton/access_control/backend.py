@@ -175,7 +175,7 @@ class AccessControlAuthBackend(AuthenticationBackend):
 
     @property
     def enforcer(self) -> PolicyEnforcer:
-        """The running loop's policy enforcer for this backend's settings, shared with every other decision site."""
+        """The process's policy enforcer for this backend's settings, shared with every other decision site."""
         return policy_enforcer(self.settings)
 
     async def _get_access_token(self, conn):

@@ -28,10 +28,6 @@ from tai42_skeleton.operations.registry import operation_registry
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
-# The enforcer's alru cache is created and used across boots — a benign loop-reset test
-# artifact, exactly as the other AC-e2e suites document.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _PROBE_ROUTER = "tests.authz._fixtures.execution_probe"
 _FENCED_OP = "exec_probe_fenced"
 _FENCED_PATH = "/api/exec-probe/deploy/fenced"

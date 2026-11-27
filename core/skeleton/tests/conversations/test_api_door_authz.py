@@ -29,10 +29,6 @@ from tai42_skeleton.conversations.turn import ApiSubmitResult
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, _FakeApp, make_client_ctx, make_pg_ctx
 
-# The enforcer's alru cache is created in the test's loop and first used in the
-# TestClient's portal loop — a benign loop-change reset that is a test artifact.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _MESSAGES_PATTERN = r"/api/conversations/.+/messages"
 _TEMPLATE = "/conversations-messages"
 _SCOPE = "conversations-protected"
@@ -105,11 +101,7 @@ def bound_app():
 @pytest.fixture
 def client(monkeypatch, bound_app) -> TestClient:
     """The door behind the real auth stack: the identity store resolves each credential to
-    its principal, and the policy store carries that principal's grants.
-
-    One request per client — the enforcer's cache is built in the test's loop and used in
-    the client's portal loop, so a second request on the same client is decided under a
-    reset cache rather than under this fixture's store."""
+    its principal, and the policy store carries that principal's grants."""
     ac_settings = AccessControlSettings(path_patterns={_MESSAGES_PATTERN: _TEMPLATE})
     redis = FakeRedis(
         hashes={

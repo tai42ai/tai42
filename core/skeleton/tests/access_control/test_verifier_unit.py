@@ -413,7 +413,7 @@ async def test_dynamic_patterns_raises_on_uncompilable_regex(monkeypatch):
 
 
 async def test_dynamic_patterns_raises_on_error_is_fail_closed(monkeypatch):
-    """A dynamic-pattern fetch error fails closed by RAISING, so alru never caches
+    """A dynamic-pattern fetch error fails closed by RAISING, so the cache never keeps
     a degraded empty result and the request is denied loudly downstream."""
     settings = AccessControlSettings()
     pg = FakeAccessControlPg()
@@ -434,7 +434,7 @@ async def test_raw_fetch_route_hit(monkeypatch):
 
 
 async def test_raw_fetch_route_raises_on_error_is_fail_closed(monkeypatch):
-    """A route-map fetch error fails closed by RAISING, so alru never caches a
+    """A route-map fetch error fails closed by RAISING, so the cache never keeps a
     degraded ``None`` and the request is denied loudly rather than silently."""
     settings = AccessControlSettings()
     pg = FakeAccessControlPg()

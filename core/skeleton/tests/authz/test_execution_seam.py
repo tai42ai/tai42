@@ -44,9 +44,6 @@ from tai42_skeleton.operations.registry import operation_registry
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 from ..access_control.test_policy_store import _MemStore
 
-# The enforcer's alru cache is created and used across boots — a benign loop-reset artifact.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _PROBE_ROUTER = "tests.authz._fixtures.execution_probe"
 
 _FENCED_OP = "exec_probe_fenced"
@@ -771,7 +768,7 @@ async def _stored_policy_version() -> int:
     return await policy_module.PolicyEnforcer(access_control_settings()).current_policy_version()
 
 
-# -- one policy enforcer per event loop -----------------------------------------
+# -- one policy enforcer per settings object ------------------------------------
 
 
 def test_a_hundred_nested_decisions_build_one_enforcer(monkeypatch: pytest.MonkeyPatch, ac) -> None:

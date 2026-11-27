@@ -46,7 +46,6 @@ from ._served_app import (
 )
 
 pytestmark = [
-    pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning"),
     # See ``test_transport_sessions``: the SDK's streamable-HTTP POST leaves its SSE reader unclosed.
     pytest.mark.filterwarnings("ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning"),
 ]

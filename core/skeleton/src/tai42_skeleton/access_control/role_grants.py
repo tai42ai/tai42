@@ -22,10 +22,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from async_lru import alru_cache
 from tai42_contract.access_control.models import AccessPolicy, RoleDefinition
 from tai42_contract.versioning.errors import DocumentNotFoundError
 from tai42_kit.settings import register_settings_reset
+from tai42_kit.utils.async_cache import AsyncCache
 
 from tai42_skeleton.access_control.role_gate import (
     DenialCause,
@@ -40,9 +40,7 @@ if TYPE_CHECKING:
     from tai42_skeleton.app.route_registry import RouteMetadata
 
 
-async def _raw_resolve_grants(role_name: str, version: int) -> RoleGrants:
-    # ``version`` participates only in the cache key (a role edit bumps it, forcing a
-    # fresh read of the CURRENT grant map); the fetch itself is version-independent.
+async def _raw_resolve_grants(role_name: str) -> RoleGrants:
     # A missing/deleted role raises ``DocumentNotFoundError`` — a fail-closed deny at
     # the caller, never a silent empty grant that would read as "no access" yet not
     # distinguish a genuinely deleted role.
@@ -53,10 +51,10 @@ async def _raw_resolve_grants(role_name: str, version: int) -> RoleGrants:
     return dict(role.grants)
 
 
-_grants_cache = None
+_grants_cache: AsyncCache[tuple[str, int], RoleGrants] | None = None
 
 
-def _get_grants_cache(settings: AccessControlSettings):
+def _get_grants_cache(settings: AccessControlSettings) -> AsyncCache[tuple[str, int], RoleGrants]:
     """The memoized version-keyed grant cache, mirroring ``PolicyEnforcer``'s policy cache (same size/ttl bound).
 
     Version participates in the key, so a role edit's version bump yields a fresh slot — a cross-worker miss
@@ -64,7 +62,7 @@ def _get_grants_cache(settings: AccessControlSettings):
     """
     global _grants_cache
     if _grants_cache is None:
-        _grants_cache = alru_cache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)(_raw_resolve_grants)
+        _grants_cache = AsyncCache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)
     return _grants_cache
 
 
@@ -84,7 +82,9 @@ async def resolve_role_grants(role_name: str, version: int) -> RoleGrants:
     Raises ``DocumentNotFoundError`` when the role does not exist (fail-closed deny).
     """
     settings = access_control_settings()
-    return await _get_grants_cache(settings)(role_name, version)
+    # ``version`` keys the cache only (a role edit bumps it, forcing a fresh read of the CURRENT
+    # grant map); the read itself is version-independent.
+    return await _get_grants_cache(settings).get_or_load((role_name, version), lambda: _raw_resolve_grants(role_name))
 
 
 async def role_level_decision_for_route(

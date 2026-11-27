@@ -36,7 +36,6 @@ from tai42_skeleton.app.serve_exit import arm_serve_exit
 from ._served_app import ADMIN_KEY, INITIALIZE_BODY, REQUEST_TIMEOUT_S, bearer, install_access_control, served
 
 pytestmark = [
-    pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning"),
     # The SDK answers a streamable-HTTP POST with an SSE response whose reader stream the
     # SSE response iterates to its end and never closes; anyio reports it when freed.
     pytest.mark.filterwarnings("ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning"),

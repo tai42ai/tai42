@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 
+import httpx
 import pytest
 
 pytest.importorskip("langgraph")
@@ -359,6 +360,30 @@ def test_a_model_kwargs_entry_the_sdk_call_does_not_take_is_refused_at_build(stu
 def test_a_model_kwargs_entry_the_sdk_call_takes_is_sent(stub: _Stub) -> None:
     _build("openai", stub, model_kwargs={"user": "u-1"}).invoke("hello")
     assert stub.requests[0].body["user"] == "u-1"
+
+
+# The chat model moves a declared field given inside ``model_kwargs`` into that field and warns.
+@pytest.mark.filterwarnings("ignore:Parameters {'temperature'} should be specified explicitly:UserWarning")
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_a_declared_setting_given_in_model_kwargs_is_sent(stub: _Stub, provider: str) -> None:
+    _build(provider, stub, model_kwargs={"temperature": 0.3}).invoke("hello")
+    assert stub.requests[0].body["temperature"] == 0.3
+
+
+# The chat model moves a declared field given inside ``model_kwargs`` into that field and warns.
+@pytest.mark.filterwarnings("ignore:Parameters {'http_async_client'} should be specified explicitly:UserWarning")
+@pytest.mark.parametrize("model", ["openai", "xai", "embedding"])
+def test_a_declared_client_field_given_in_model_kwargs_is_refused_naming_it(stub: _Stub, model: str) -> None:
+    given: dict[str, Any] = {"model_kwargs": {"http_async_client": httpx.AsyncClient()}}
+
+    def build() -> Any:
+        if model == "embedding":
+            return _build_embedding("openai", stub, **given)
+        return _build(model, stub, **given)
+
+    with pytest.raises(ValueError, match=r"^(openai|xai): 'http_async_client' cannot reach the provider"):
+        build()
+    assert stub.requests == []
 
 
 # provider -> how the built model exposes the request timeout its client applies.

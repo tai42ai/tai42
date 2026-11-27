@@ -31,16 +31,16 @@ from tai42_contract.template import (
     TemplateRenderError,
 )
 from tai42_contract.tools import ReferenceHolder
+from tai42_kit.utils.single_flight import SingleFlight
 
 from tai42_skeleton.template.dependency_preload import DependencyPreload
 from tai42_skeleton.template.input_schema import template_input_schema, undeclared_variables
 from tai42_skeleton.template.media import MediaBlock
 from tai42_skeleton.template.path_guard import UnsafeTemplatePathError, safe_template_path
 from tai42_skeleton.template.reads import RecordingEnvironment, record_template_read
-from tai42_skeleton.template.render_cache import CompiledTemplate, RenderCache
+from tai42_skeleton.template.render_cache import CompiledCacheInfo, CompiledTemplate, RenderCache
 from tai42_skeleton.template.render_locale import compiled_for_locale, list_format, locale_variant_ids, with_locale
 from tai42_skeleton.template.settings import template_cache_settings
-from tai42_skeleton.template.single_flight import SingleFlight
 from tai42_skeleton.template.sources import SourceLoader
 from tai42_skeleton.template.store_writes import StoreWrites
 
@@ -119,7 +119,7 @@ class ResourceManager:
         # loop, through its pooled storage client. ``loader_fault`` holds the exception the
         # loader let through during the current render, which is never the author's.
         self._render_loop = threading.local()
-        self._loads_in_flight: SingleFlight[str] = SingleFlight()
+        self._loads_in_flight: SingleFlight[str, str] = SingleFlight()
         # Renders run on threads of their own, never the loop's default pool: a render waits on a
         # dependency load, and a load may itself need a default-pool thread (a storage driver's
         # ``to_thread``), so renders holding every default thread would wait forever. Sized like the
@@ -127,7 +127,8 @@ class ResourceManager:
         self._render_threads = ThreadPoolExecutor(thread_name_prefix="template-render")
         # The preloads of the renders in progress: every eviction drops its ids from each, so a
         # render reads an evicted dependency fresh instead of compiling the text read before.
-        # Mutated only on the loop; a render thread reads a preload by single dict lookups.
+        # Mutated from every job's loop, one set operation at a time; a render thread reads a preload by single
+        # dict lookups.
         self._preloads: set[DependencyPreload] = set()
 
         self._render_cache = RenderCache(self._env, self._load_by_id, template_cache_settings())
@@ -378,8 +379,8 @@ class ResourceManager:
         self._forget_loads(lambda name: name.startswith(prefix))
         self._on_evicted(TemplateEviction(path=path.rstrip("/"), prefix=True))
 
-    def get_cache_info(self) -> Any:
-        """Return the compiled-template cache statistics, or ``None`` when caching is disabled."""
+    def get_cache_info(self) -> CompiledCacheInfo | None:
+        """The compiled-template cache's live size and bound, or ``None`` when caching is disabled."""
         return self._render_cache.info()
 
     async def render_by_id(

@@ -65,6 +65,8 @@ dependencies = [
     # Imported directly by compute/pool.py (the worker-process pool: a timed-out job's worker
     # is terminated and replaced).
     "pebble>=5.2.3,<6",
+    # Imported directly by utils/async_cache.py (the bounded ttl/LRU store of awaited loads).
+    "cachetools>=7.2.8",
 ]
 
 [project.urls]

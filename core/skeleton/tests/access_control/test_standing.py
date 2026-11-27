@@ -21,8 +21,6 @@ from tai42_skeleton.access_control.standing import (
 
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 
 @pytest.fixture
 def enforcer(monkeypatch: pytest.MonkeyPatch, pg: FakeAccessControlPg) -> PolicyEnforcer:

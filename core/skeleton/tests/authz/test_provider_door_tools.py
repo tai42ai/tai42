@@ -21,8 +21,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from .test_middleware_fence import _bind_caller, _Dispatcher, ac  # noqa: F401  (ac: the policy-store fixture)
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _DOOR = ("discover_connector_server", "add_connector_provider", "remove_connector_provider", "set_connector_client")
 
 

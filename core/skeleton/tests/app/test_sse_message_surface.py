@@ -28,10 +28,6 @@ from tai42_skeleton.app.instance import app
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, _FakeApp, make_client_ctx, make_pg_ctx
 
-# The enforcer's alru cache is created in the test's loop and first used in the
-# TestClient's portal loop — a benign loop-change reset that is a test artifact.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _EDITOR_KEY = "editor-raw-key"
 
 

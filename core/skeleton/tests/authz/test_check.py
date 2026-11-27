@@ -34,10 +34,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from .conftest import FENCED_TEMPLATE_ROUTE, PROBE_ROUTES, SHADOW_ROUTE
 
-# alru caches are held across the several ``asyncio.run`` loops a test opens — a benign
-# loop-reset artifact, since a real process serves one loop for its lifetime.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 
 def _op(reg, route="/api/things/wipe", method="POST"):
     @operation(name="wipe", summary="Wipe", tags=["things"], registry=reg)

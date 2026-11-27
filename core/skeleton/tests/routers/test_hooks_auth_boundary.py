@@ -36,10 +36,6 @@ from tai42_skeleton.hooks.trigger_links import ResolvedTrigger
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, _FakeApp, make_client_ctx, make_pg_ctx
 from ._auth_boundary import wire_store_from_route_strings
 
-# The enforcer's alru cache is created in the test's loop and first used in the
-# TestClient's portal loop — a benign loop-change reset that is a test artifact.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 # The credential the identity store admits in the credentialed client.
 _VALID_KEY = "trigger-caller-key"
 
