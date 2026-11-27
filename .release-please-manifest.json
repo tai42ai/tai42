@@ -1,10 +1,10 @@
 {
   "core/contract": "31.3.0",
-  "core/kit": "23.0.1",
+  "core/kit": "23.0.2",
   "core/cli": "23.1.1",
-  "core/skeleton": "45.0.0",
+  "core/skeleton": "46.0.0",
   "plugins/accounts-postgres": "9.0.11",
-  "plugins/agents": "17.0.3",
+  "plugins/agents": "17.0.4",
   "plugins/backend-arq": "11.0.9",
   "plugins/backend-celery": "11.0.9",
   "plugins/backend-rq": "11.0.9",
@@ -31,5 +31,5 @@
   "plugins/tools-whatsapp": "3.0.11",
   "plugins/webhook-verifier-github": "2.0.9",
   "plugins/webhook-verifier-stripe": "2.0.9",
-  "e2e": "32.2.0"
+  "e2e": "32.2.1"
 }
