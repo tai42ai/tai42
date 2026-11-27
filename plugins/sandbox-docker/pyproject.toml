@@ -55,7 +55,7 @@ Changelog = "https://github.com/tai42ai/tai42/blob/main/plugins/sandbox-docker/C
 dev = [
     "pytest>=8",
     # 1.4 runs the exec-attachment suite on each loop factory its conftest names.
-    "pytest-asyncio>=1.4",
+    "pytest-asyncio>=1.5.0",
     "pytest-cov>=5",
     "ruff>=0.6",
     "pyright>=1.1.389",
