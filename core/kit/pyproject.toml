@@ -160,7 +160,7 @@ monitoring = [
 redis = ["redis>=5"]
 curl = ["curl-cffi>=0.16.3"]
 # orjson: imported directly by clients/impl/postgres_json.py (the pools' json loader).
-postgres = ["psycopg[binary,pool]>=3.3.7", "orjson>=3.11.8,<4"]
+postgres = ["psycopg[binary,pool]>=3.3.9", "orjson>=3.11.8,<4"]
 
 # OIDC discovery + JWKS + JWT verification (net/jwt.py imports joserfc at module top).
 jwt = ["joserfc>=1.7.5"]
