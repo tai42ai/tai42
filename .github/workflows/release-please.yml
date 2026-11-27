@@ -48,7 +48,7 @@ jobs:
         run: npm ci
       # The python-workspace plugin asks scripts/range_sync.py which members'
       # ranges the release moves, so the run needs a Python on PATH.
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         if: env.HAS_RELEASE_TOKEN == 'true'
         with:
           version: "0.11.26"
@@ -101,7 +101,7 @@ jobs:
           ref: ${{ needs.release-please.outputs.pr_branch }}
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           fetch-depth: 0 # full history so the release-diff detection below can merge-base main
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           version: "0.11.26"
           enable-cache: true
