@@ -62,11 +62,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
-# The enforcer's alru cache is created and used across boots — a benign loop-reset
-# test artifact, exactly as the other AC-e2e suite documents.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
-
 # Infra router modules carrying no projectable op; excluded so the stack loads only
 # the operation-bearing routers (importing prometheus/metrics mutates process-global
 # multiproc state that would leak into the metrics-CLI tests).

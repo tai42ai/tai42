@@ -45,7 +45,7 @@ async def test_fetch_policy_empty_when_no_data(monkeypatch):
 
 
 async def test_fetch_policy_raises_on_error_is_fail_closed(monkeypatch):
-    """A policy-fetch error fails closed by RAISING, so alru never caches a
+    """A policy-fetch error fails closed by RAISING, so the cache never keeps a
     degraded empty policy; the error propagates out of ``authenticate`` and
     becomes a clean deny rather than a silent no-scopes allow-through."""
     settings = AccessControlSettings()

@@ -33,8 +33,6 @@ from ._door_fixtures import (
 )
 from ._served_app import ADMIN_KEY, VIEWER_KEY, install_access_control
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 POINTER = f'Bearer resource_metadata="{PUBLIC_BASE_URL}/.well-known/oauth-protected-resource/mcp"'
 MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
 INITIALIZE = {

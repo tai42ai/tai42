@@ -34,7 +34,6 @@ from ._served_app import (
 )
 
 pytestmark = [
-    pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning"),
     # The SDK answers a streamable-HTTP POST, and opens a session's GET stream, with an SSE
     # response whose reader stream the SSE response iterates to its end and never closes
     # (``sse_starlette`` ``EventSourceResponse._stream_response``); anyio reports that reader

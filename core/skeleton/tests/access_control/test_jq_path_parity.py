@@ -32,8 +32,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 from ..authz.conftest import _FakeApp, _recorded_routes
 from .conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _TEMPLATE = "/api/things/{thing}/inspect"
 
 

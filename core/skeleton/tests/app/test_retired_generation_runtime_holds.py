@@ -43,7 +43,6 @@ from ._served_app import ADMIN_KEY, ResponseLog, bearer, install_access_control,
 from ._served_app import streamable_session_tools as open_streamable_session
 
 pytestmark = [
-    pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning"),
     # The SDK answers a streamable-HTTP POST with an SSE response whose reader stream the
     # response iterates to its end and never closes; anyio reports that reader as unclosed
     # when it is freed. A third-party resource report, matched narrowly.

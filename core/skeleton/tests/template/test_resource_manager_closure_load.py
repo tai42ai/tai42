@@ -105,11 +105,11 @@ async def test_concurrent_renders_share_one_read_of_a_common_include() -> None:
         asyncio.create_task(manager.render_by_id("page.j2")),
         asyncio.create_task(manager.render_by_id("other.j2")),
     ]
+    # A read in flight is keyed by the loop that runs it and the id; the renders' loads run on this loop.
+    slot = (asyncio.get_running_loop(), "lib/a.j2")
     try:
         async with asyncio.timeout(1):
-            while "lib/a.j2" not in manager._loads_in_flight._flights or (
-                manager._loads_in_flight._flights["lib/a.j2"].waiters < 2
-            ):
+            while slot not in manager._loads_in_flight._flights or manager._loads_in_flight._flights[slot].waiters < 2:
                 await asyncio.sleep(0)
     finally:
         release.set()
@@ -279,7 +279,7 @@ async def _until_reading(manager: ResourceManager, store: _InMemoryStorage, temp
     """Return once a second render reads ``template_id``, by joining the read in flight or starting its own."""
     async with asyncio.timeout(1):
         while store.loads.count(template_id) < 2:
-            flight = manager._loads_in_flight._flights.get(template_id)
+            flight = manager._loads_in_flight._flights.get((asyncio.get_running_loop(), template_id))
             if flight is not None and flight.waiters >= 2:
                 return
             await asyncio.sleep(0)

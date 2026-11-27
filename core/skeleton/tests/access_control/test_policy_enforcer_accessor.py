@@ -1,4 +1,4 @@
-"""``policy_enforcer``: one ``PolicyEnforcer`` per running event loop, rebuilt on a settings change.
+"""``policy_enforcer``: one ``PolicyEnforcer`` per settings object, rebuilt on a settings change.
 
 The decision-level proofs (a hundred nested decisions build one enforcer; a writer's bump is
 seen by the next decision) live beside the seam's fixtures in ``tests/authz/test_execution_seam.py``.
@@ -7,18 +7,15 @@ seen by the next decision) live beside the seam's fixtures in ``tests/authz/test
 from __future__ import annotations
 
 import asyncio
-import gc
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_kit.settings import reset_all_settings
 
-from tai42_skeleton.access_control import policy as policy_module
 from tai42_skeleton.access_control.policy import PolicyEnforcer, policy_enforcer
 from tai42_skeleton.access_control.settings import AccessControlSettings
-
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
 
 
 def _settings() -> AccessControlSettings:
@@ -37,23 +34,6 @@ def test_one_loop_reuses_one_enforcer_across_awaits() -> None:
     first, second = asyncio.run(run())
     assert first is second
     assert first.settings is settings
-
-
-def test_two_loops_get_two_enforcers() -> None:
-    settings = _settings()
-    built: list[PolicyEnforcer] = []
-
-    async def run() -> None:
-        built.append(policy_enforcer(settings))
-
-    threads = [threading.Thread(target=asyncio.run, args=(run(),)) for _ in range(2)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    assert len(built) == 2
-    assert built[0] is not built[1]
 
 
 def test_a_settings_reset_rebuilds_the_enforcer() -> None:
@@ -77,11 +57,6 @@ def test_a_different_settings_object_rebuilds_the_enforcer() -> None:
         assert policy_enforcer(other_settings) is second
 
     asyncio.run(run())
-
-
-def test_outside_a_running_loop_the_accessor_raises() -> None:
-    with pytest.raises(RuntimeError, match="no running event loop"):
-        policy_enforcer(_settings())
 
 
 def test_a_failing_build_stores_nothing_and_the_next_call_builds_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,21 +83,41 @@ def test_a_failing_build_stores_nothing_and_the_next_call_builds_again(monkeypat
     assert attempts == 2
 
 
-def test_a_closed_loops_enforcer_is_not_retained(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_one_enforcer_and_its_policy_cache_serve_every_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = _settings()
+    fetched: list[str] = []
+    first_fetching = threading.Event()
+    second_asked = threading.Event()
 
-    async def empty_policy(self: PolicyEnforcer, user_id: str) -> AccessPolicy:
+    async def held_policy(self: PolicyEnforcer, user_id: str) -> AccessPolicy:
+        fetched.append(user_id)
+        first_fetching.set()
+        # Held off the loop thread until the other loop has asked, so both loops ask while a fetch is in flight.
+        assert await asyncio.to_thread(second_asked.wait, 10)
         return AccessPolicy()
 
-    monkeypatch.setattr(PolicyEnforcer, "_raw_fetch_policy", empty_policy)
-    held_while_running: list[int] = []
+    monkeypatch.setattr(PolicyEnforcer, "_raw_fetch_policy", held_policy)
 
-    async def run() -> None:
-        # A used policy cache keeps its loop referenced, so only an explicit drop frees it.
-        await policy_enforcer(settings).get_policy_at("u1", 0)
-        gc.collect()
-        held_while_running.append(len(policy_module._enforcers))
+    async def ask(*, signal: threading.Event | None) -> PolicyEnforcer:
+        enforcer = policy_enforcer(settings)
+        if signal is not None:
+            signal.set()
+        assert await enforcer.get_policy_at("u1", 0) == AccessPolicy()
+        return enforcer
 
-    asyncio.run(run())
-    asyncio.run(run())
-    assert held_while_running == [1, 1]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(asyncio.run, ask(signal=None))
+        assert first_fetching.wait(10)
+        second = pool.submit(asyncio.run, ask(signal=second_asked))
+
+        second_enforcer = second.result(timeout=10)
+        first_enforcer = first.result(timeout=10)
+    assert first_enforcer is second_enforcer
+    assert fetched == ["u1", "u1"]
+
+    assert asyncio.run(ask(signal=None)) is first_enforcer
+    assert fetched == ["u1", "u1"]
+
+    reset_all_settings()
+    assert asyncio.run(ask(signal=None)) is not first_enforcer
+    assert fetched == ["u1", "u1", "u1"]

@@ -95,8 +95,9 @@ class ToolRunDrainedError(asyncio.CancelledError):
 
 # The enrolled supervisor whose run the current code belongs to. Set in the supervisor
 # task's own context at enrollment, so every task the run spawns (an agent's tool node
-# runs each tool call in a child task) carries it too.
-_running_supervisor: ContextVar[asyncio.Task[None] | None] = ContextVar("running_supervisor", default=None)
+# runs each tool call in a child task) carries it too. Held weakly: every snapshot of such a
+# context keeps what the variable holds.
+_running_supervisor: ContextVar[weakref.ref[asyncio.Task[None]] | None] = ContextVar("running_supervisor", default=None)
 
 
 def reserve_active_slot(limit: int) -> bool:
@@ -134,7 +135,7 @@ def _enroll_supervisor(task: asyncio.Task[None]) -> None:
     """
     from tai42_skeleton.app.epoch import current_epoch_or_none
 
-    task.get_context().run(_running_supervisor.set, task)
+    task.get_context().run(_running_supervisor.set, weakref.ref(task))
     _SUPERVISORS.add(task)
     epoch = current_epoch_or_none()
     if epoch is not None:
@@ -149,7 +150,8 @@ def running_supervisor() -> tuple[asyncio.Task[Any], int] | None:
     no epoch tagged. The reload gate reads it to record a supervised run that drives a
     reload, so that generation's retire leaves it running.
     """
-    task = _running_supervisor.get()
+    ref = _running_supervisor.get()
+    task = None if ref is None else ref()
     if task is None or task.done() or task not in _SUPERVISORS:
         return None
     epoch = _SUPERVISOR_EPOCH.get(task)

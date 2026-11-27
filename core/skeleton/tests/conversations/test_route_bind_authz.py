@@ -28,8 +28,6 @@ from tai42_skeleton.operations.errors import BadRequestError, ForbiddenError
 from .._helpers import inline_templated_text
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 
 class _DictManager(BaseConversationsManager):
     """A non-in-memory routing-row store that records every write, so a refused bind can

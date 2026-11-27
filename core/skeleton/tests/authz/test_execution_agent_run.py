@@ -24,10 +24,6 @@ from tai42_skeleton.authz.execution import authorize_execution_agent_run
 from tai42_skeleton.authz.identity import CallerIdentity
 from tai42_skeleton.operations.errors import PermissionDeniedError
 
-# alru caches are held across the several ``asyncio.run`` loops each test opens — a benign
-# loop-reset artifact, since a real process serves one loop for its lifetime.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _AGENT = "faker"
 _RUN_PATH = f"/api/agents/{_AGENT}/runs"
 _ROUTE_KEY = ("/api/agents/{name}/runs", ("POST",))

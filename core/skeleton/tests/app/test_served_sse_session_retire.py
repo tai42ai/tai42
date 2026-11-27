@@ -47,7 +47,6 @@ from .test_served_transport_streams import (  # noqa: F401 - the autouse fixture
 )
 
 pytestmark = [
-    pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning"),
     pytest.mark.filterwarnings("ignore:Unclosed <MemoryObjectReceiveStream:ResourceWarning"),
 ]
 

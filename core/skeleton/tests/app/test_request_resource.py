@@ -37,8 +37,6 @@ from ._door_fixtures import (
 )
 from ._served_app import install_access_control
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 
 @pytest.fixture(autouse=True)
 def _surfaces(monkeypatch: pytest.MonkeyPatch, streamable_http_mounted) -> None:

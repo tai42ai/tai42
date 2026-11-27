@@ -38,9 +38,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 
-# The enforcer's alru cache is created and used across boots — a benign loop-reset artifact.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _SECRET_OP = "read_env"  # GET /api/config/env — the secret env dump
 _SECRET_PATH = "/api/config/env"
 _FENCED_OP = "write_env"  # POST /api/config/env

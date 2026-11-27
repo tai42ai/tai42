@@ -1,15 +1,11 @@
 """Access-policy fetch, caching, and condition enforcement for the access-control gate."""
 
-import asyncio
 import json
 import threading
-from asyncio import AbstractEventLoop
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
-from weakref import WeakKeyDictionary
 
-from async_lru import alru_cache
 from starlette.authentication import AuthenticationError
 from tai42_contract.access_control.models import AccessPolicy
 from tai42_contract.app import tai42_app
@@ -17,6 +13,7 @@ from tai42_contract.template import TemplatedText
 from tai42_kit.clients import client_ctx
 from tai42_kit.clients.impl.redis import RedisClient, hgetall
 from tai42_kit.settings import register_settings_reset
+from tai42_kit.utils.async_cache import AsyncCache
 from tai42_kit.utils.data import run_jq_first
 
 from tai42_skeleton.access_control.policy_version_scope import memoized_policy_version, remember_policy_version
@@ -90,8 +87,8 @@ class PolicyEnforcer:
         # version): ``version`` is a value the fetch ignores, so a bumped version
         # simply yields a fresh cache slot — a cross-worker miss that re-reads the
         # edited policy from redis instead of serving the stale cached copy.
-        self._fetch_policy = alru_cache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)(
-            self._raw_fetch_policy_versioned
+        self._policies: AsyncCache[tuple[str, int], AccessPolicy] = AsyncCache(
+            maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds
         )
 
     async def get_policy(self, user_id: str) -> AccessPolicy:
@@ -118,7 +115,7 @@ class PolicyEnforcer:
         of the decision serves a pre-bump cached copy while another serves a post-bump
         one. The underlying reads stay independent and live, which is what a fire needs.
         """
-        return await self._fetch_policy(user_id, version)
+        return await self._policies.get_or_load((user_id, version), lambda: self._raw_fetch_policy(user_id))
 
     async def current_policy_version(self) -> int:
         """The current policy version (a cheap single-key GET) — the one version read every cache keys on.
@@ -142,14 +139,9 @@ class PolicyEnforcer:
         remember_policy_version(version)
         return version
 
-    async def _raw_fetch_policy_versioned(self, user_id: str, version: int) -> AccessPolicy:
-        # ``version`` participates only in the cache key (see ``__init__``); the
-        # actual fetch is version-independent.
-        return await self._raw_fetch_policy(user_id)
-
     async def _raw_fetch_policy(self, user_id: str) -> AccessPolicy:
         # A genuine backend error must fail closed by RAISING, not by returning an
-        # empty policy: the alru cache only stores successful returns, so a
+        # empty policy: the policy cache only stores successful returns, so a
         # swallowed error would be cached and stick for the ttl. The error
         # propagates out of ``authenticate``, which turns it into a clean deny.
         data = await access_control_store().get_policy_body(user_id)
@@ -220,35 +212,30 @@ class PolicyEnforcer:
             raise AuthenticationError("Policy violation: configured condition rendered empty")
 
 
-# One enforcer per running loop: its policy cache (async-lru) binds to the first loop that
-# uses it. The cache also keeps that loop referenced, so a closed loop's entry is dropped
-# explicitly when the next enforcer is built rather than left to the weak key.
-_enforcers: "WeakKeyDictionary[AbstractEventLoop, tuple[AccessControlSettings, PolicyEnforcer]]" = WeakKeyDictionary()
-_enforcers_lock = threading.Lock()
+_enforcer: tuple[AccessControlSettings, PolicyEnforcer] | None = None
+_enforcer_lock = threading.Lock()
 
 
 def policy_enforcer(settings: AccessControlSettings) -> PolicyEnforcer:
-    """The running loop's ``PolicyEnforcer`` for ``settings``, built on first use.
+    """The ``PolicyEnforcer`` for ``settings``, built on first use.
 
     Memoized on the settings OBJECT: a different settings object gets a new enforcer, and a
-    settings reset drops every one. The policy cache it carries is keyed on the policy version
+    settings reset drops it. The policy cache it carries is keyed on the policy version
     each decision reads live, so sharing it across decisions costs nothing against revocation.
-    Raises ``RuntimeError`` when no event loop is running.
+    The one enforcer serves every loop of the process, its cache being loop-free.
     """
-    loop = asyncio.get_running_loop()
-    with _enforcers_lock:
-        held = _enforcers.get(loop)
-        if held is not None and held[0] is settings:
-            return held[1]
+    global _enforcer
+    with _enforcer_lock:
+        if _enforcer is not None and _enforcer[0] is settings:
+            return _enforcer[1]
         enforcer = PolicyEnforcer(settings)
-        for closed in [other for other in _enforcers if other.is_closed()]:
-            del _enforcers[closed]
-        _enforcers[loop] = (settings, enforcer)
+        _enforcer = (settings, enforcer)
         return enforcer
 
 
 @register_settings_reset
-def reset_policy_enforcers() -> None:
-    """Drop every loop's enforcer so a settings reload rebuilds them."""
-    with _enforcers_lock:
-        _enforcers.clear()
+def reset_policy_enforcer() -> None:
+    """Drop the enforcer so a settings reload rebuilds it."""
+    global _enforcer
+    with _enforcer_lock:
+        _enforcer = None

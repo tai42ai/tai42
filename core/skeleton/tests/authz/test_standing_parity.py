@@ -53,8 +53,6 @@ from tai42_skeleton.operations.errors import PermissionDeniedError
 from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_client_ctx, make_pg_ctx
 from .conftest import _FakeApp
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _TRUE = {"content": "true"}
 
 # principal -> (stored owner, the owner its credential claims)

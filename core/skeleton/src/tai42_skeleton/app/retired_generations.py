@@ -1,9 +1,9 @@
 """The certification of retired serving generations: their settings are judged once they are released.
 
 A retired generation stays reachable while a task, timer, transport or stream of the
-runtime still carries the context of one of its requests: a cache's expiry timer or a
-keep-alive timer for seconds, a drain-exempt stream until its client disconnects, a task
-or a pooled connection one of its requests started for that task's or connection's life,
+runtime still carries the context of one of its requests: a keep-alive timer for
+seconds, a drain-exempt stream until its client disconnects, a task or a pooled connection
+one of its requests started for that task's or connection's life,
 which can be the process's. Three such holds have no seam on the platform's side: on uvloop
 an outbound keep-alive connection an httpx-backed client opens holds the request that opened
 it until its client epoch's pool is drained at that epoch's retire; on the asyncio selector

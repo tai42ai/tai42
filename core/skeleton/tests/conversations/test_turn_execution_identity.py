@@ -48,8 +48,6 @@ from ..access_control.conftest import FakeAccessControlPg, FakeRedis, make_clien
 from .conftest import FakeManager
 from .fake_record_redis import FakeRecordRedis, make_record_client_ctx
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 _PROBE_ROUTER = "tests.authz._fixtures.execution_probe"
 _AGENT = "conv-agent"
 _RUN_PATH = f"/api/agents/{_AGENT}/runs"

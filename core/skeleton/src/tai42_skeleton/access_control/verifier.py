@@ -5,11 +5,11 @@ import re
 from collections.abc import Callable
 from re import Pattern
 
-from async_lru import alru_cache
 from fastmcp.server.auth import AccessToken, TokenVerifier
 from tai42_contract.access_control import OWNER_USER_ID_CLAIM, UNIVERSAL_SCOPE
 from tai42_contract.access_control.identity import ApiKeyIdentityProvider, IdentityProvider
 from tai42_kit.settings import register_settings_reset
+from tai42_kit.utils.async_cache import AsyncCache
 
 from tai42_skeleton.access_control import role_gate
 from tai42_skeleton.access_control.path_canon import (
@@ -212,12 +212,11 @@ class AccessControlVerifier(TokenVerifier):
         # serving the stale copy, without waiting out the ttl. Mirrors
         # PolicyEnforcer's version-aware policy cache; the same bump that busts the
         # policy cache busts these.
-        self._fetch_route_data = alru_cache(maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds)(
-            self._raw_fetch_route_versioned
+        self._routes: AsyncCache[tuple[str, int], str | None] = AsyncCache(
+            maxsize=settings.cache_size, ttl=settings.cache_ttl_seconds
         )
-
-        self._get_dynamic_patterns = alru_cache(maxsize=1, ttl=settings.cache_ttl_seconds)(
-            self._raw_fetch_dynamic_patterns_versioned
+        self._dynamic_patterns: AsyncCache[int, list[tuple[Pattern, str]]] = AsyncCache(
+            maxsize=1, ttl=settings.cache_ttl_seconds
         )
 
     def _resolve_providers(self) -> list[IdentityProvider]:
@@ -492,19 +491,15 @@ class AccessControlVerifier(TokenVerifier):
         path = UUID_PATTERN.sub("/{uuid}", path)
         return DIGIT_PATTERN.sub("/{id}", path)
 
-    async def _raw_fetch_route_versioned(self, path: str, version: int) -> str | None:
-        # ``version`` participates only in the cache key (see __init__); the actual
-        # fetch is version-independent.
-        return await self._raw_fetch_route(path)
+    async def _fetch_route_data(self, path: str, version: int) -> str | None:
+        return await self._routes.get_or_load((path, version), lambda: self._raw_fetch_route(path))
 
-    async def _raw_fetch_dynamic_patterns_versioned(self, version: int) -> list[tuple[Pattern, str]]:
-        # ``version`` participates only in the cache key; the fetch is
-        # version-independent.
-        return await self._raw_fetch_dynamic_patterns()
+    async def _get_dynamic_patterns(self, version: int) -> list[tuple[Pattern, str]]:
+        return await self._dynamic_patterns.get_or_load(version, self._raw_fetch_dynamic_patterns)
 
     async def _raw_fetch_dynamic_patterns(self) -> list[tuple[Pattern, str]]:
         # A genuine backend/parse error must fail closed by RAISING, never by
-        # returning a degraded (empty/partial) result: the alru cache only stores
+        # returning a degraded (empty/partial) result: the pattern cache only stores
         # successful returns, so a swallowed error would otherwise be cached and
         # stick for the ttl. The error propagates to ResourceGuardMiddleware,
         # which denies the request -- fail-closed and loud, never silent.
@@ -526,7 +521,7 @@ class AccessControlVerifier(TokenVerifier):
 
     async def _raw_fetch_route(self, path: str) -> str | None:
         # A genuine backend error must fail closed by RAISING (see
-        # _raw_fetch_dynamic_patterns): a swallowed error would be cached by alru
+        # _raw_fetch_dynamic_patterns): a swallowed error would be cached by the route cache
         # and stick for the ttl. A successful read with no mapping returns None
         # (legitimately-unknown route -> denied downstream).
         return await access_control_store().fetch_route(path)

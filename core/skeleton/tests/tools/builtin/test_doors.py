@@ -66,9 +66,6 @@ from ...conversations.conftest import (
     env,  # noqa: F401  (re-exported fixture)
 )
 
-# alru caches are held across the several loops these tests open — a benign loop-reset artifact.
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 
 @pytest.fixture
 def door_routes_registered():

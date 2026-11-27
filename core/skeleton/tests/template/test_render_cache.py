@@ -1,11 +1,14 @@
 """The render cache, through its resource manager: the compiled-template cache enabled vs disabled,
-its controls, the compile-once inline cache, the evict seams that invalidate it, the id registry kept
-bounded by the cache's own evictions, and the engine's ``{% include %}``/``{% extends %}``
+its controls, what a cached template holds, the compile-once inline cache, the evict seams that
+invalidate it, its own TTL/LRU evictions, and the engine's ``{% include %}``/``{% extends %}``
 dependency cache freed by every eviction. All storage is an in-memory ``Storage`` double."""
 
 from __future__ import annotations
 
-from typing import Protocol, cast
+import asyncio
+import contextvars
+import gc
+import weakref
 
 import pytest
 from tai42_contract.template import TemplatedText
@@ -15,39 +18,24 @@ from tai42_skeleton.template.settings import TemplateCacheSettings
 
 from ._manager_fixtures import _manager
 
-
-class _SupportsCacheInvalidate(Protocol):
-    def cache_invalidate(self, *args: object) -> bool: ...
-
-
-class _SupportsCacheContains(Protocol):
-    def cache_contains(self, *args: object) -> bool: ...
-
-
 # --- construction: cache enabled vs disabled --------------------------------
 
 
 def test_cache_enabled_exposes_cache_info_and_clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Default (positive ttl + size) wraps fetch in an alru cache: info reports
-    hits/misses and clear empties it."""
+    """Default (positive ttl + size) caches compiled templates: a second render reads nothing,
+    info reports the live size and bound, and clear empties it."""
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
-    manager, _ = _manager({"a.j2": "{{ x }}"})
+    manager, store = _manager({"a.j2": "{{ x }}"})
 
-    assert manager.get_cache_info() is not None
+    assert manager.get_cache_info() == (0, 8)
 
     async def run() -> None:
         await manager.render_by_id("a.j2", {"x": 1})  # miss -> populate
-        await manager.render_by_id("a.j2", {"x": 2})  # hit
-        info = manager.get_cache_info()
-        assert info is not None
-        assert info.hits == 1
-        assert info.misses == 1
+        assert await manager.render_by_id("a.j2", {"x": 2}) == "2"  # hit
+        assert store.loads == ["a.j2"]
+        assert manager.get_cache_info() == (1, 8)
         manager.clear_cache()
-        cleared = manager.get_cache_info()
-        assert cleared is not None
-        assert cleared.currsize == 0
-
-    import asyncio
+        assert manager.get_cache_info() == (0, 8)
 
     asyncio.run(run())
 
@@ -82,9 +70,38 @@ def test_cache_disabled_has_no_cache_controls(monkeypatch: pytest.MonkeyPatch, s
     assert manager.get_cache_info() is None
     manager.clear_cache()  # no-op, must not raise
 
-    import asyncio
-
     assert asyncio.run(manager.render_by_id("a.j2", {"x": 5})) == "5"
+
+
+# --- what a cached template holds ---------------------------------------------
+
+
+_render_scope: contextvars.ContextVar[object] = contextvars.ContextVar("render_scope")
+
+
+class _Scope:
+    """A value a caller binds in its context while it renders."""
+
+
+async def test_a_cached_template_keeps_nothing_of_the_loading_task(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
+    manager, store = _manager({"a.j2": "{{ x }}"})
+    scope = _Scope()
+    held = weakref.ref(scope)
+
+    async def render_in_scope(value: _Scope) -> str:
+        _render_scope.set(value)
+        return await manager.render_by_id("a.j2", {"x": 1})
+
+    assert await asyncio.create_task(render_in_scope(scope)) == "1"
+    del scope
+    await asyncio.sleep(0)
+    gc.collect()
+
+    assert held() is None
+    assert _compiled_size(manager) == 1
+    assert await manager.render_by_id("a.j2", {"x": 2}) == "2"
+    assert store.loads == ["a.j2"]
 
 
 # --- the public evict seams ---------------------------------------------------
@@ -96,10 +113,10 @@ async def test_evict_compiled_public_seam_drops_one_key(monkeypatch: pytest.Monk
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
     manager, _ = _manager({"m.j2": "{{ x }}"})
     await manager.render_by_id("m.j2", {"x": 1})
-    assert manager.get_cache_info().currsize == 1
+    assert _compiled_size(manager) == 1
 
     manager.evict_compiled("m.j2")
-    assert manager.get_cache_info().currsize == 0
+    assert _compiled_size(manager) == 0
     manager.evict_compiled("m.j2")  # idempotent: no-op, must not raise
     manager.evict_compiled("never-cached.j2")  # unknown key: no-op
 
@@ -111,80 +128,66 @@ async def test_evict_dir_public_seam_drops_under_prefix(monkeypatch: pytest.Monk
     manager, _ = _manager({"dir/a.j2": "{{ x }}", "other.j2": "{{ y }}"})
     await manager.render_by_id("dir/a.j2", {"x": 1})
     await manager.render_by_id("other.j2", {"y": 2})
-    assert manager.get_cache_info().currsize == 2
+    assert _compiled_size(manager) == 2
 
     manager.evict_dir("dir")
-    assert manager.get_cache_info().currsize == 1
+    assert _compiled_size(manager) == 1
     assert await manager.render_by_id("other.j2", {"y": 7}) == "7"
 
 
-# --- tracking set pruned against the cache's own evictions ------------------
+# --- the cache's own evictions ----------------------------------------------
 
 
-async def test_cached_ids_pruned_against_lru_eviction(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Under a bounded ``max_size`` the compile-time sweep drops tracking-set ids
-    the LRU has evicted, so the set never outgrows the live cache."""
+async def test_an_id_the_lru_evicted_is_read_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Under a bounded ``max_size`` the least recently used id leaves the cache and its next render reads it."""
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=2))
-    manager, _ = _manager({"a.j2": "{{ x }}", "b.j2": "{{ y }}", "c.j2": "{{ z }}"})
+    manager, store = _manager({"a.j2": "{{ x }}", "b.j2": "{{ y }}", "c.j2": "{{ z }}"})
 
     await manager.render_by_id("a.j2", {"x": 1})
     await manager.render_by_id("b.j2", {"y": 1})
-    await manager.render_by_id("c.j2", {"z": 1})  # evicts a.j2 (LRU), sweeps the set
+    await manager.render_by_id("c.j2", {"z": 1})  # evicts a.j2 (LRU)
+    assert _compiled_size(manager) == 2
 
-    ids = manager._render_cache._tracked_ids
-    assert len(ids) <= 2
-    contains = cast(_SupportsCacheContains, manager._render_cache._compiled).cache_contains
-    # Every tracked id is still genuinely in the cache — no stale ids linger.
-    assert all(contains(tid) for tid in ids)
+    await manager.render_by_id("b.j2", {"y": 2})
+    await manager.render_by_id("c.j2", {"z": 2})
+    assert store.loads == ["a.j2", "b.j2", "c.j2"]
+    await manager.render_by_id("a.j2", {"x": 2})
+    assert store.loads == ["a.j2", "b.j2", "c.j2", "a.j2"]
 
 
-async def test_cached_ids_pruned_against_ttl_eviction(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With ``max_size=None`` + a ttl, ids the cache expires on its own are still
-    swept from the tracking set on the next compile (the unbounded+ttl mode)."""
-    import asyncio
-
+async def test_an_id_past_its_ttl_is_read_again_with_an_unbounded_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``max_size=None`` + a ttl, an expired id is no longer counted and its next render reads it."""
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=1, max_size=None))
-    manager, _ = _manager({"a.j2": "{{ x }}", "b.j2": "{{ y }}", "c.j2": "{{ z }}"})
+    manager, store = _manager({"a.j2": "{{ x }}", "b.j2": "{{ y }}"})
 
     await manager.render_by_id("a.j2", {"x": 1})
     await manager.render_by_id("b.j2", {"y": 1})
-    assert manager._render_cache._tracked_ids == {"a.j2", "b.j2"}
+    assert manager.get_cache_info() == (2, None)
 
-    # Let the ttl call_later fire (evicting a.j2/b.j2 from the underlying cache),
-    # then a fresh compile runs the amortized sweep.
     await asyncio.sleep(1.3)
-    await manager.render_by_id("c.j2", {"z": 1})
-
-    ids = manager._render_cache._tracked_ids
-    assert "a.j2" not in ids
-    assert "b.j2" not in ids
-    assert "c.j2" in ids
-    contains = cast(_SupportsCacheContains, manager._render_cache._compiled).cache_contains
-    assert all(contains(tid) for tid in ids)
+    assert _compiled_size(manager) == 0
+    await manager.render_by_id("a.j2", {"x": 2})
+    assert store.loads == ["a.j2", "b.j2", "a.j2"]
+    assert _compiled_size(manager) == 1
 
 
-async def test_delete_template_dir_prunes_ids_already_evicted_by_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The id registry stays bounded by what is actually cached: an entry the
-    cache dropped on its own (simulating TTL/LRU) is pruned during a dir delete
-    even though it lies outside the deleted prefix."""
+async def test_a_dir_delete_drops_only_the_ids_under_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dir delete drops the compiled ids under its prefix and keeps every other one compiled."""
     monkeypatch.setattr(rm_mod, "template_cache_settings", lambda: TemplateCacheSettings(ttl=300, max_size=8))
-    manager, _ = _manager({"keep.j2": "{{ x }}", "gone.j2": "{{ y }}"})
+    manager, store = _manager({"keep.j2": "{{ x }}", "dir/gone.j2": "{{ y }}"})
     await manager.render_by_id("keep.j2", {"x": 1})
-    await manager.render_by_id("gone.j2", {"y": 2})
-    assert manager._render_cache._tracked_ids == {"keep.j2", "gone.j2"}
+    await manager.render_by_id("dir/gone.j2", {"y": 2})
 
-    # Drop "gone.j2" straight from the underlying cache (as TTL/LRU would),
-    # leaving it stale in the tracking registry.
-    # With caching on, ``_compiled`` is the alru cache wrapper, which
-    # exposes ``cache_invalidate``; its static type is a union with the bare
-    # (uncached) method, so narrow to the cache-bearing shape here.
-    cached = cast(_SupportsCacheInvalidate, manager._render_cache._compiled)
-    assert cached.cache_invalidate("gone.j2") is True
-    assert manager._render_cache._tracked_ids == {"keep.j2", "gone.j2"}
+    await manager.delete_template_dir("dir")
+    assert _compiled_size(manager) == 1
+    assert await manager.render_by_id("keep.j2", {"x": 3}) == "3"
+    assert store.loads == ["keep.j2", "dir/gone.j2"]
 
-    # A dir delete that matches neither id still prunes the stale "gone.j2".
-    await manager.delete_template_dir("unrelated")
-    assert manager._render_cache._tracked_ids == {"keep.j2"}
+
+def _compiled_size(manager: rm_mod.ResourceManager) -> int:
+    info = manager.get_cache_info()
+    assert info is not None
+    return info.currsize
 
 
 # --- eviction frees the engine-cached {% include %}/{% extends %} targets ----

@@ -836,28 +836,34 @@ def _install_manager(monkeypatch: pytest.MonkeyPatch, items: dict[str, str]) -> 
     return manager
 
 
+def _compiled_size(manager: ResourceManager) -> int:
+    info = manager.get_cache_info()
+    assert info is not None
+    return info.currsize
+
+
 async def test_dispatch_evict_template_drops_the_worker_compilation(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _install_manager(monkeypatch, {"m.j2": "v1 {{ x }}"})
     assert await manager.render_by_id("m.j2", {"x": 1}) == "v1 1"  # populate this worker's cache
-    assert manager.get_cache_info().currsize == 1
+    assert _compiled_size(manager) == 1
 
     result = await _Mixin()._dispatch_bus_op(EvictTemplate(op="evict_template", path="m.j2"))
 
     assert result == {"evicted": "m.j2"}
-    assert manager.get_cache_info().currsize == 0  # the stale compilation is gone
+    assert _compiled_size(manager) == 0  # the stale compilation is gone
 
 
 async def test_dispatch_evict_template_prefix_drops_only_the_directory(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _install_manager(monkeypatch, {"dir/a.j2": "{{ x }}", "other.j2": "{{ y }}"})
     await manager.render_by_id("dir/a.j2", {"x": 1})
     await manager.render_by_id("other.j2", {"y": 2})
-    assert manager.get_cache_info().currsize == 2
+    assert _compiled_size(manager) == 2
 
     result = await _Mixin()._dispatch_bus_op(EvictTemplate(op="evict_template", path="dir", prefix=True))
 
     assert result == {"evicted": "dir"}
     # Only the compilation under the prefix is dropped; the sibling stays cached.
-    assert manager.get_cache_info().currsize == 1
+    assert _compiled_size(manager) == 1
     assert await manager.render_by_id("other.j2", {"y": 9}) == "9"
 
 
@@ -867,19 +873,19 @@ async def test_an_evict_template_without_a_path_fails_before_anything_applies(mo
     # A malformed fleet op must fail its confirmation, never apply a partial op.
     with pytest.raises(ValueError, match="path"):
         await _Mixin()._apply_bus_op({"op": "evict_template"}, deadline=1e9)
-    assert manager.get_cache_info().currsize == 1
+    assert _compiled_size(manager) == 1
 
 
 async def test_dispatch_clear_template_cache_drops_everything(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = _install_manager(monkeypatch, {"a.j2": "{{ x }}", "b.j2": "{{ y }}"})
     await manager.render_by_id("a.j2", {"x": 1})
     await manager.render_by_id("b.j2", {"y": 2})
-    assert manager.get_cache_info().currsize == 2
+    assert _compiled_size(manager) == 2
 
     result = await _Mixin()._dispatch_bus_op(ClearTemplateCache(op="clear_template_cache"))
 
     assert result == {"cleared": True}
-    assert manager.get_cache_info().currsize == 0
+    assert _compiled_size(manager) == 0
 
 
 @pytest.mark.parametrize(

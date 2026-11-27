@@ -128,6 +128,15 @@ def _build_llm(provider: str, **kwargs) -> BaseChatModel:
     raise ValueError(f"Unsupported chat model provider: '{provider}'")
 
 
+def _probe(model_cls: type[BaseModel], built: dict[str, Any], forwarded: dict[str, Any]) -> Any:
+    """A ``model_cls`` built with the same settings, to ask which SDK call it makes.
+
+    It is handed a copy of ``forwarded``: the chat model moves a declared field out of the
+    ``model_kwargs`` it is given, and the caller's entries must reach the model the build returns.
+    """
+    return model_cls(**built, **({"model_kwargs": dict(forwarded)} if forwarded else {}))
+
+
 def _openai_call_parameters(
     model_cls: type[BaseModel], built: dict[str, Any], forwarded: dict[str, Any]
 ) -> frozenset[str]:
@@ -140,7 +149,7 @@ def _openai_call_parameters(
     from openai.resources.chat import Completions
     from openai.resources.responses import Responses
 
-    probe: Any = model_cls(**built, **({"model_kwargs": forwarded} if forwarded else {}))
+    probe = _probe(model_cls, built, forwarded)
     call = Responses.create if probe._use_responses_api(probe._default_params) else Completions.create
     # The chat model fills the conversation, the model and streaming itself.
     return parameters(call) - {"messages", "input", "model", "stream"}
@@ -158,7 +167,7 @@ def _anthropic_call_parameters(
     from anthropic.resources import Messages  # pyright: ignore[reportMissingImports]
     from anthropic.resources.beta import Messages as BetaMessages  # pyright: ignore[reportMissingImports]
 
-    probe: Any = model_cls(**built, **({"model_kwargs": forwarded} if forwarded else {}))
+    probe = _probe(model_cls, built, forwarded)
     payload = probe._get_request_payload([HumanMessage("")])
     # The chat model fills the conversation, the model and streaming itself.
     return parameters(BetaMessages.create if "betas" in payload else Messages.create) - {"messages", "model", "stream"}

@@ -32,7 +32,7 @@ either commits before the removal (which then strips the freshly-granted scope) 
 runs after it and fails validation because the scope has no live route. A durable
 policy therefore never holds a scope with no backing route.
 
-The version-aware ``alru_cache`` layers stay in the verifier/enforcer on top of the
+The version-aware caches stay in the verifier/enforcer on top of the
 RAW reads this store exposes; the store does no caching of its own.
 """
 

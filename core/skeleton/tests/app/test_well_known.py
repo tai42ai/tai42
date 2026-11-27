@@ -33,8 +33,6 @@ from ._door_fixtures import (
 )
 from ._served_app import REQUEST_TIMEOUT_S, install_access_control, manifest, served
 
-pytestmark = pytest.mark.filterwarnings("ignore::async_lru.AlruCacheLoopResetWarning")
-
 DOC = "/.well-known/oauth-protected-resource"
 
 
